@@ -1,0 +1,509 @@
+POD4ME — CODE AUDIT
+===================
+Date: 2026-10-29
+Scope: working tree of /home/aurelien/repo/pod4me (branch main, commit 28dce4c "Add app"
+       plus the uncommitted 0.3.1 changes). Every source, schema, migration, test, build
+       and tooling file was read in full; nothing was modified.
+
+What was executed as part of the audit
+--------------------------------------
+  java tools/CoreTestLauncher.java ............ PASS, 73 checks
+  python3 -I tools/check_schema.py ............ PASS, 9 tests
+  ./gradlew :app:testDebugUnitTest :app:lintDebug --offline
+      unit tests ............................... PASS, 20 tests (CoreRules 1, Suggestions 7,
+                                                 LibraryStore 10, LibraryMigration 2)
+      lint ..................................... 0 errors, 19 warnings (dependency versions,
+                                                 ObsoleteSdkInt, UseKtx, ExportedService)
+  Ad-hoc probe of FeedParser on edge-case inputs (results quoted in findings F3, F4, F5).
+
+Not executed: the instrumented tests and the 18 device checks in docs/device-checks.md.
+Everything that depends on One UI, the system media panel, DownloadManager or real
+audio hardware is therefore unverified in this audit as well.
+
+Overall assessment
+------------------
+The code base is small (about 2,000 lines of Kotlin/Java), readable and well layered:
+pure business rules in domain/, one serialized SQLite boundary in data/, a
+MediaSessionService that owns ExoPlayer, and a single Compose file for the UI. The
+dangerous surfaces (SQL, XML, URLs, file deletion, external media controllers) are
+handled carefully. All functional requirements of goal.txt are implemented (see the
+coverage table at the end), with two small, documented deviations.
+
+The main weaknesses are not in the rules but in scaling and in a few interaction
+corners between the player and the store:
+
+  * The whole library, including every episode's show notes, is re-read from SQLite
+    and re-compared after every write, and writes happen every 5 s while playing.
+    This is at odds with the new 64 MB feed support. (F1)
+  * The UI re-filters and re-sorts the full episode list on every recomposition, and
+    the player state forces a recomposition every 500 ms. (F2)
+  * Three real-world feed parsing gaps (dates with zone names, enclosure URLs with
+    spaces, namespace-blind field capture) silently lose dates, episodes or titles. (F3-F5)
+  * Marking the current episode "unheard" past the 95 % mark is immediately undone. (F6)
+  * No backup or device-transfer of the database, which conflicts with the stated goal
+    of moving to "the new phones to come". (F10)
+
+None of these is a crash or data-loss bug in normal use. They are the items to fix
+before relying on the app daily and before growing it.
+
+Severity scale: HIGH = will bite in normal use or at the advertised scale;
+MEDIUM = incorrect behaviour in a reachable but narrower situation; LOW = quality,
+robustness or clarity.
+
+
+FINDINGS
+========
+
+F1  HIGH  Full-library snapshot after every write, with all show notes
+    Where: data/LibraryStore.kt:48-56 (write), :257-266 (snapshot),
+           playback/PlaybackService.kt:144-146 (progress write every 5 s while playing),
+           MainActivity.kt:39-44 (reconcile write every 3 s while any download is pending)
+    What:  Every write() ends with snapshot(db), which runs SELECT * FROM episodes and
+           materialises every row, description included, into a new Library. The result
+           is assigned to a StateFlow, whose setter compares the new Library with the
+           old one using data-class equals, i.e. it compares every description string
+           character by character (the strings are fresh cursor copies, so there is no
+           identity short-cut). With the new 64 MB feed limit a single feed can carry
+           tens of MB of notes: that text would be copied, held in RAM (UTF-16, so up to
+           2x) and compared every 5 s during playback and every 3 s during downloads.
+    Why:   Memory pressure/OOM risk on large feeds, GC churn, battery, and main-thread
+           recomposition work every 5 s; the streaming parser's memory discipline is
+           undone one layer up.
+    Fix:   (a) Drop description from the snapshot; keep a Store method that loads one
+           episode's notes on demand for EpisodeDialog. (b) Give progress() a cheap path
+           that updates only the changed episode in the in-memory Library instead of
+           re-reading everything, or at minimum debounce snapshots. (c) Consider removing
+           the 3 s reconcile polling: DownloadReceiver already handles completion; a
+           poll of 15-30 s is enough to catch failures/removals.
+
+F2  HIGH  Derived lists rebuilt on every recomposition; recomposition every 500 ms
+    Where: ui/PodApp.kt:135-146 (filter + sort of the full list, not remembered),
+           :124 (per-feed scan of all episodes for the chips), :214 (same in FeedScreen),
+           ui/AppModel.kt:35-37 (player.refresh() every 500 ms),
+           domain/Models.kt:38 (FEED sort calls feedName(), a linear scan, per comparison)
+    What:  `playback` is read inside the Scaffold content lambda, so each 500 ms position
+           tick recomposes that scope and re-runs filter/sort over all episodes and the
+           O(feeds x episodes) chip scans. The lambdas passed to EpisodeCard capture a
+           fresh playOrder list each time, so visible rows recompose too.
+    Why:   Scales as episodes x refresh rate; noticeable jank and battery use on long
+           feeds while playing, even though nothing visible changes.
+    Fix:   remember(library, page, filter, sort, browseFeed) { ... } for the derived
+           list and playOrder; read only playback.id in the list scope (derivedStateOf);
+           precompute feed name map and per-feed counts once per Library; have
+           PlayerClient refresh position only when the Player page or mini-player is
+           visible (or use Compose's withFrameNanos / a lifecycle-aware ticker).
+
+F3  MEDIUM  Publication dates with zone names, naive ISO dates, date-only values are lost
+    Where: domain/FeedParser.java:162-172
+    Verified (probe): the following common pubDate values all parse to 0 and display as
+    "Date unknown", sorted last in Latest:
+        Wed, 02 Oct 2002 08:00:00 PDT
+        Wed, 02 Oct 2002 08:00:00 EST
+        Wed, 02 Oct 2002 08:00:00 UT
+        2025-01-02T10:30:00            (no offset)
+        2025-01-02                     (date only)
+    RFC 822/2822 explicitly allow EST/EDT/CST/CDT/MST/MDT/PST/PDT/UT and many US feeds
+    use them. Since "Latest ... ordered by date of publication" is a core requirement,
+    these episodes end up in the wrong place.
+    Fix:   add a formatter with pattern "EEE, d MMM yyyy HH:mm:ss z" (lower-case z, with
+           a small alias map for the RFC 822 abbreviations to avoid ambiguity), then
+           LocalDateTime.parse(...).atZone(UTC) and LocalDate.parse(...).atStartOfDay(UTC)
+           fallbacks. Also strip a trailing "(…)" comment. Keep 0 as the final fallback.
+
+F4  MEDIUM  Enclosure URLs containing a space (or any character java.net.URI rejects)
+            silently drop the episode
+    Where: domain/FeedParser.java:157-160 (resolve catches IllegalArgumentException and
+           returns ""), :133 (finishEntry returns when audio is empty)
+    Verified (probe): a feed with enclosures "…/my file.mp3" and "…/ok.mp3" imports one
+    episode; the first vanishes with no error, no feed-level warning, nothing in the UI.
+    Fix:   percent-encode spaces (and other illegal characters) before resolving, e.g.
+           via android.net.Uri / okhttp3.HttpUrl semantics or a small escaper; and record
+           "n episodes skipped" so the user can tell. Same for artwork hrefs.
+
+F5  MEDIUM  Item fields are captured by local name only, ignoring the namespace
+    Where: domain/FeedParser.java:66 (ITEM_FIELDS), :100-106 (capture), :122 (first wins)
+    Verified (probe): when <itunes:title> precedes <title> the episode title becomes the
+    short iTunes title. The same mechanism makes <media:content>, <media:title>,
+    <itunes:summary>, <podcast:*> and any other namespaced element with a matching local
+    name compete with the RSS element of the same name; which one wins depends only on
+    document order. Today the fallback chain hides most cases, but it is order-dependent
+    behaviour on untrusted input.
+    Fix:   key captures by (namespace URI, local name): title/description/pubDate/guid
+           from the null namespace, encoded from the content: namespace, duration from
+           the itunes: namespace, Atom fields from the Atom namespace.
+
+F6  MEDIUM  Marking the current episode "unheard" past the 95 % mark is immediately undone
+    Where: data/LibraryStore.kt:135-141 (setHeard resets position to 0),
+           ui/PodApp.kt:442-445 (UI then seeks the player to 0),
+           playback/PlaybackService.kt:50-62 (onPositionDiscontinuity persists the OLD
+           position first), data/LibraryStore.kt:129-134 (progress() re-applies the
+           heard rule because heard is now false)
+    Sequence: heard -> false, position -> 0; seek(0) raises a discontinuity whose old
+    position is, say, 96 %; progress(id, old) sees !heard && isHeard -> heard = true
+    again; then progress(id, 0) stores position 0. Result: heard, position 0. The user's
+    action is silently reverted. Any listener-driven save of the pre-seek position has
+    the same effect (pause right before unchecking, etc.).
+    Fix:   in onPositionDiscontinuity persist the old position only when the media item
+           changed (oldPosition.mediaItem != newPosition.mediaItem); for a seek inside
+           the same item the new position is the only one that matters ("seeking past
+           the threshold counts as reaching it" is still honoured). Alternatively make
+           setHeard(false) also stamp a "heard cleared at" time that progress() respects.
+
+F7  MEDIUM  Feed-declared duration is preferred over the real one for heard detection
+    Where: playback/PlaybackService.kt:53-57
+    What:  The discontinuity handler uses the stored duration (initially the feed's
+           itunes:duration) and only falls back to the player timeline when it is 0.
+           If the feed under-reports the length, a seek can mark the episode heard too
+           early and show a wrong percentage until the next 5 s tick overwrites the
+           duration with player.duration. Also duration("3723000") is read as seconds
+           (probe: 3,723,000 s), so feeds that publish milliseconds produce absurd
+           lengths and 0 % progress forever (until the player corrects it).
+    Fix:   prefer the timeline duration whenever it is known (≠ C.TIME_UNSET), use the
+           stored one only as a fallback; cap or sanity-check parsed durations.
+
+F8  MEDIUM  Restored-but-idle episode is treated as "active playback"
+    Where: playback/PlaybackService.kt:147-160 -> startEpisode -> store.activate()
+    What:  On every service start the last episode is loaded with play = false, which
+           sets store.activeEpisode. Consequences: its Delete button is disabled with
+           "Stop playback before deleting", and expireAtLaunch() skips it, although
+           nothing is playing. The user has to open Player and press Stop first.
+    Fix:   set activeEpisode only when playback actually starts (play == true or
+           onIsPlayingChanged(true)), or treat "active" as playWhenReady && item loaded.
+
+F9  MEDIUM  "Previous" cannot reach the episode before the one you started
+    Where: playback/PlaybackService.kt:171 (setMediaItem replaces the playlist),
+           :183-191 (only items after the current one are managed)
+    What:  The playlist starts at the chosen episode, so hasPreviousMediaItem() is false
+           until an automatic/next transition has happened. goal.txt asks for "previous
+           and next track" in the system player. The Media3 notification will also show
+           a disabled Previous for the first track.
+    Fix:   seed the playlist with the preceding items of the context order (bounded, e.g.
+           the previous 5), or implement a custom "previous" that uses contextOrder.
+
+F10 MEDIUM  Database excluded from backup and device-to-device transfer
+    Where: AndroidManifest.xml:11 (allowBackup="false"), res/xml/data_extraction_rules.xml
+    What:  Every domain is excluded for both cloud backup and device transfer, so Smart
+           Switch / Google's transfer will bring an empty app to the next phone: no
+           subscriptions, lists, ratings, bookmarks, positions. Only the feed list is
+           exportable by hand. goal.txt explicitly targets future phones.
+    Fix:   allow the "database" and "sharedpref" domains for device-transfer (and
+           optionally cloud backup), keep audio files excluded; or add an "Export
+           library" (JSON) action next to the feed export. Note DownloadManager rows will
+           not transfer either, which the reconcile loop already tolerates.
+
+F11 LOW  DownloadManager records are never removed after a successful download
+    Where: data/LibraryStore.kt:178-190 (download_id cleared on success), :221-228
+           (deleteFile removes only when download_id is still set)
+    What:  Correctly, remove() is not called on success because it would delete the
+           file. But the id is then forgotten, so the system's Downloads list grows by
+           one entry per episode forever and deleting audio leaves a dangling record.
+    Fix:   keep the id in a dedicated column (e.g. manager_id) and call remove() in
+           deleteFile() after the file is gone.
+
+F12 LOW  Quick-settings -10 s / +10 s placement is unverified
+    Where: playback/PlaybackService.kt:134-139 (CommandButton.SLOT_OVERFLOW)
+    What:  The buttons are declared for the overflow slot; whether One UI's media panel
+           shows them in the five-button row is decided by the system. Device check 6 is
+           still pending. If they do not appear, try SLOT_BACK_SECONDARY /
+           SLOT_FORWARD_SECONDARY, which exist for exactly this purpose.
+           Also missing: setArtworkUri on the MediaMetadata (no art in the system player
+           and lock screen, two lines to add) and a MediaButtonReceiver +
+           onPlaybackResumption() so a headset/Bluetooth Play press resumes after the
+           process has been killed.
+
+F13 LOW  The `changing` flag cannot guard re-entrant player calls
+    Where: playback/PlaybackService.kt:73-76
+    What:  ExoPlayer delivers events raised from inside a listener after the current
+           callback returns, so the seekTo() in onMediaItemTransition produces a
+           discontinuity with changing == false. Today this only writes position 0 then
+           the resume position for the new episode (harmless), but it shows the pattern
+           is fragile. Prefer passing the start position when adding items
+           (MediaItem.Builder... / addMediaItem + seekTo before prepare) or checking the
+           discontinuity reason instead of a boolean.
+
+F14 LOW  Error messages that mislead or leak internals
+    Where: ui/AppModel.kt:44 (every SQLiteConstraintException -> "That name is already
+           in use", including FK failures from membership/enqueue on a vanished row),
+           data/LibraryStore.kt:195 ("Download failed (1006)" numeric code),
+           domain/Suggestions.kt:27-29 ("Required value was null." from requireNotNull)
+    Fix:   map DownloadManager reason codes to text (1006 no space, 1004 HTTP data error,
+           1008 cannot resume, 1007 no external storage...), give requireNotNull messages,
+           and map constraint errors per operation.
+
+F15 LOW  Episodes are never pruned; Latest shows the union of all episodes ever seen
+    Where: data/LibraryStore.kt:69-77, domain/Models.kt:25-28
+    What:  Feeds that publish a rolling window keep growing the local table. This is a
+           reasonable "history" feature but it is undocumented and unbounded, and every
+           refresh rewrites title/description/audio_url of every known episode even when
+           unchanged (write amplification on 64 MB feeds).
+    Fix:   compare before updating; optionally prune episodes that are absent from the
+           feed, not downloaded, not rated and not bookmarked.
+
+F16 LOW  Deviations from goal.txt to confirm consciously
+    a) A re-downloaded heard episode stays in Heard (README "Storage rules"); the spec
+       says each downloaded track is by default in Unheard.
+    b) Choosing any sort other than Stars while in "Starred" jumps to the "All" view
+       (ui/PodApp.kt:127). Spec-conformant, but surprising.
+    c) "0 GB downloaded" for libraries below 500 MB: exactly the integer rounding the
+       spec asks for; consider showing MB below 1 GB.
+    d) Video enclosures (type video/*) are skipped (probe confirmed), RSS 1.0/RDF feeds
+       and any feed with a DOCTYPE, even a harmless <!DOCTYPE rss>, are rejected
+       (probe confirmed). All defensible; just document them in the README.
+
+F17 LOW  Small code-quality items
+    - data/LibraryStore.kt:250-254  takeQueue() is unused (dead code).
+    - data/LibraryStore.kt:26-29    schema/migration files are split on ';', which breaks
+                                    the day a literal contains one; use one statement per
+                                    line or a tiny tokenizer.
+    - data/LibraryStore.kt:86       Policy.downloadExpiry(0, days) called purely for its
+                                    exception; a Policy.validateExpiryDays() reads better.
+    - data/FeedClient.kt:14         User-Agent still says Pod4Me/0.1.
+    - app/build.gradle.kts:20       kotlinOptions {} is deprecated; use
+                                    kotlin { compilerOptions { jvmTarget } }.
+    - ui/PodApp.kt:96               Navigation icons are text glyphs ("L", "↓", "F"...)
+                                    although drawables exist; purely cosmetic.
+    - ui/PodApp.kt:574              a DateTimeFormatter is built per row; hoist it.
+    - ui/PodApp.kt:560              TextInputDialog remembers `initial` without a key;
+                                    fine today because dialogs are always dismissed
+                                    between uses, but fragile.
+    - No strings.xml: all UI text is hard-coded (lint warns). Acceptable for a personal
+      app; worth knowing before any localisation.
+    - ui/AppModel.kt:35-37          the 500 ms refresh ticker also runs while the app is
+                                    in the background (cheap, but needless wake-ups).
+    - MainActivity launches in the sharing app's task when invoked via ACTION_SEND
+      (no singleTask), so two MainActivity/AppModel instances can coexist. Harmless with
+      the shared Application-level store, but each instance runs its own tickers.
+
+F18 LOW  Project hygiene
+    - The working tree holds the entire 0.3.x effort uncommitted (13 modified, 9 new
+      files) on top of a single commit. Commit it; the CI workflow only sees pushes.
+    - README "Build status" says the Android build is pending, yet dist/Pod4Me.apk was
+      built today and tests/lint pass; update the status and record device-check results
+      in docs/device-checks.md as the file itself requests.
+    - The daily-driver APK is debug-signed and debuggable. Add a release build type
+      (minify off is fine) with a personal keystore; the README already explains why
+      the key must be kept.
+    - Lint "NewerVersionAvailable" warnings: compose-bom 2025.10.01, media3 1.8.0,
+      okhttp 4.12 are fine; just be deliberate about upgrades.
+
+
+SECURITY REVIEW (no findings requiring action)
+----------------------------------------------
+  + SQL is fully parameterised; schema executed from bundled assets only.
+  + XML: DTDs and external entities rejected before expansion (JVM-verified, Android
+    test pending); 64 MB cap enforced on the decoded stream; no DOM.
+  + URLs: only http/https without user-info are accepted for feeds, enclosures, artwork,
+    deep links and shared text; file:, javascript: and credential-bearing URLs are
+    rejected (tests cover this).
+  + File deletion is restricted to the app's podcast directory via canonical-path check.
+  + MediaSession: external controllers cannot inject media items; START/STOP commands
+    accepted only from the app's own package.
+  + pod4me:// deep links and shared text never subscribe/download without an explicit
+    confirmation dialog.
+  + No WebView; show notes are rendered through Html.fromHtml to plain text.
+  ~ usesCleartextTraffic="true" is global. Necessary for http-only feeds/audio; if you
+    want to tighten it, a network-security-config can keep cleartext while enabling
+    certificate-transparency-style checks for https hosts. Low priority.
+  ~ PlaybackService is exported (required by MediaSessionService). DownloadReceiver is
+    not exported (correct; DownloadManager targets the package explicitly).
+
+
+TEST COVERAGE ASSESSMENT
+------------------------
+  Strong:  Policy, Upcoming, FeedParser (RSS, Atom, encodings, limits, artwork), feed
+           list format, Suggestions, LibraryStore rules (protection, expiry, heard,
+           unsubscribe/resubscribe, migrations 1->3).
+  Missing: PlaybackService (the most intricate state machine: context order, cursor,
+           queue consumption, resume, the F6/F13 interactions), reconcileDownloads
+           (Robolectric's ShadowDownloadManager can drive STATUS_SUCCESSFUL/FAILED),
+           AppModel.importFeeds/refresh (failure accounting), and any UI test.
+  Pending: all 18 device checks; FeedParserDeviceTest (Expat DTD rejection) and
+           FeedListFormatDeviceTest have not been run on a device.
+  Suggested first additions: a Robolectric test of the F6 scenario against
+  LibraryStore + a fake position source; a reconcileDownloads test for the three
+  statuses; a Suggestions test for "pod4me://feed" without a query (message quality).
+
+
+REQUIREMENTS COVERAGE (goal.txt)
+--------------------------------
+  Subscribe by RSS URL; import/export one per line ........ done (export adds "[title]",
+                                                              import tolerates both)
+  Customisable feed names ................................... done, survives refresh
+  Browse per feed / Latest across feeds by pub date ......... done (dates: see F3)
+  Per-feed expiry, default 1 month, infinity allowed ........ done
+  Lists: unheard & 4ever initially, custom lists, feed
+    defaults, many-to-many membership ....................... done (+ Heard, + per-feed
+                                                              automatic views)
+  4ever tracks cannot be deleted ............................ done, manual and expiry
+  Stars 1-5 ................................................. done
+  Heard -> leaves Unheard, enters Heard, expiry
+    min(previous, 7 days) ................................... done, never extended
+  Sorting by pub date, download date, stars, feed name,
+    percentage (0 % first) .................................. done
+  All tracks with >= 1 star by decreasing stars ............. done ("Starred")
+  Delete tracks ............................................. done, with guards
+  Play with bookmarks, background playback .................. done (service + session)
+  Speed 1.0-3.0 ............................................. done, persisted
+  Read and copy episode info ................................ done
+  Share = copy source URL to clipboard ...................... done (+ share sheet
+                                                              "Suggest")
+  GB used / GB free rounded to integer ...................... done (see F16c)
+  System player with progress, -10 s, +10 s, prev, next ..... implemented; placement of
+                                                              ±10 s and "previous" on the
+                                                              first track to verify (F9,
+                                                              F12)
+  Clean, robust, minimal code base .......................... largely yes; F1/F2 are the
+                                                              scalability debt
+
+
+RECOMMENDED ORDER OF WORK
+-------------------------
+  1. Commit the current tree (F18).
+  2. F6 (one-line fix in onPositionDiscontinuity) and F8 (activeEpisode only when
+     playing): both are quick and user-visible.
+  3. F3, F4, F5 in FeedParser with the probe cases above added to CoreChecks.
+  4. F1 then F2: drop descriptions from the snapshot, remember derived lists.
+  5. F10 backup rules, before the next phone.
+  6. Run the device checks and record results; then decide on F9/F12 from what One UI
+     actually shows.
+
+
+=====================================================================
+RE-CHECK AFTER CORRECTIONS — 2026-10-29 (later the same day)
+=====================================================================
+Re-read every changed file (19 modified, 3 new: LibraryBackup.kt, migration_3_4.sql,
+LibraryMigrationTest.kt) and re-ran the same checks:
+
+  java tools/CoreTestLauncher.java ............ PASS, 88 checks (was 73)
+  python3 -I tools/check_schema.py ............ PASS, 9 tests (now includes the 3->4 migration)
+  ./gradlew :app:testDebugUnitTest :app:lintDebug --offline
+      unit tests ............................... PASS, 28 tests (was 20)
+      lint ..................................... 0 errors, 20 warnings
+  FeedParser probe re-run: all five previously failing date formats now parse; a
+  space-containing enclosure is kept as my%20file.mp3; <itunes:title> no longer
+  overrides <title>; "3723000" as a duration is rejected; already-encoded URLs are
+  preserved; skipped items are counted and reported on the feed.
+
+Verdict: yes, it is good now. All HIGH and MEDIUM findings are fixed or consciously
+resolved, with regression tests for the ones that matter. Two small new issues were
+introduced (N1, N2 below), the tree is still uncommitted, and the README lags behind
+the code. None of this blocks daily use; N1 is worth a five-line fix before the next
+build.
+
+Status of the original findings
+-------------------------------
+  F1  FIXED. Snapshot projection excludes description; progress writes replace one
+      episode in memory (write(episodeId=…)); writes that change nothing publish
+      nothing (total_changes() check); notes load on demand via store.description().
+      Verified by the new 10,001-episode / 20 MB test and the no-op reconcile test.
+  F2  FIXED. Derived lists are remembered on (catalogueRevision, page, filter, sort,
+      browseFeed); only the current id is observed in the list scope; MiniPlayer and
+      PlayerScreen collect playback state themselves; per-feed counts are lazy maps;
+      the 500 ms ticker now lives inside repeatOnLifecycle; reconcile polling is 20 s.
+  F3  FIXED. RFC 822 zone names, trailing "(comment)", naive ISO and date-only values
+      all parse; tested in CoreChecks.
+  F4  FIXED. escapeReference() percent-encodes without double-encoding; skipped items
+      are reported in the feed's error line.
+  F5  FIXED. Captures are keyed on namespace: canonical RSS/Atom elements, content:
+      encoded, itunes:title/summary/duration as fallbacks only.
+  F6  FIXED. Per-episode progress epoch invalidates in-flight saves after an explicit
+      unheard reset; seeks inside the same item persist only the new position; the
+      UI routes "mark unheard" through the service so the seek and the reset happen
+      under the same lock. Tested (delayedProgressCannotUndoExplicitUnheardReset).
+  F7  FIXED. Timeline/player duration is used for progress; duration parser rejects
+      >7 days, negative and out-of-range components.
+  F8  FIXED. No cold restore at service start; onPlaybackResumption() loads the saved
+      episode only when something asks to play. activeEpisode is set only then.
+  F9  FIXED. Up to five preceding episodes of the context order are seeded before
+      the current one, so Previous works from the first pick.
+  F10 RESOLVED DIFFERENTLY. Backup/transfer rules are unchanged (still fully
+      excluded), but a manual "Back up library" / "Restore library" (versioned JSON,
+      merge by URL/GUID/list name, validated, transactional, no paths or manager
+      ids) was added and tested, including the invalid-backup rollback. Acceptable;
+      remember to run it before changing phones (see N7).
+  F11 FIXED. manager_id column (migration 3->4, tested in Kotlin and Python);
+      deleteFile() and the repair loop remove the DownloadManager record.
+  F12 FIXED. SLOT_BACK_SECONDARY / SLOT_FORWARD_SECONDARY, artwork on the media
+      item, MediaButtonReceiver declared, onPlaybackResumption implemented. Actual
+      placement on One UI still needs the device check.
+  F13 FIXED. The resume seek is skipped for PLAYLIST_CHANGED transitions; start
+      positions are passed to setMediaItems().
+  F14 FIXED. DownloadManager reasons mapped to text; list-name collisions checked
+      before insert; suggestion errors have messages; constraint errors now say the
+      library changed.
+  F15 FIXED (write amplification). Episodes are updated only when a field differs
+      (trigger-counted test). Pruning was not added; that remains a design choice.
+  F16 b) resolved: Starred keeps whatever sort the user picks. a), c), d) unchanged,
+      still deliberate.
+  F17 ALL FIXED: takeQueue removed, one-statement-per-line SQL assets with comment
+      support, Policy.validateExpiryDays(), BuildConfig user agent, kotlin
+      compilerOptions, drawable nav icons, hoisted formatters, keyed
+      TextInputDialog, lifecycle-bound ticker, singleTask activity.
+  F18 PARTLY. A non-debuggable release build type with a persistent keystore and an
+      apksigner/aapt verification step exists in tools/build-apk.sh. Still open:
+      nothing is committed (20 modified + 10 new files on a one-commit history);
+      README still says 0.3.3 / 73 checks / debug signing while the build is 1.0.0
+      (versionCode 8) / 88 checks / release signing; README does not mention the
+      new Back up / Restore buttons; CI still builds the debug APK (fine, but say
+      so). The release keystore is a copy of the debug keystore (password
+      "android") to preserve install continuity, which is reasonable for a personal
+      phone but should be stated in the README.
+
+New issues introduced by the corrections
+----------------------------------------
+N1  MEDIUM-LOW  Restoring a backup that contains the "Shared episodes" pseudo-feed
+    onto a device that does not have it breaks future shared downloads
+    Where: data/LibraryBackup.kt:107 (feeds matched by url, else random UUID),
+           data/LibraryStore.kt:131-135 (addSharedAudio inserts id "shared", url "")
+    What:  the pseudo-feed is exported with url "". On restore, no row with url ""
+           exists, so it is re-created under a random id. Later addSharedAudio()
+           tries to insert id "shared" with the same empty url; the UNIQUE(url)
+           conflict is ignored, and the episode insert with feed_id "shared" then
+           fails the foreign key ("The library changed while this action…").
+    Fix:   in restore, keep the id "shared" when url is empty (as is done for system
+           lists), or make addSharedAudio() look the feed up by url = '' instead of
+           assuming the id.
+
+N2  LOW  RSS documents that declare a default namespace are now rejected
+    Where: domain/FeedParser.java:96, :98, :102 (root/channel/item must be in the
+           empty namespace)
+    Verified (probe): <rss xmlns="http://backend.userland.com/rss2"> yields "This
+    URL is not an RSS or Atom feed". Such feeds are rare but do exist. Fix: treat the
+    root element's namespace as the canonical RSS namespace instead of "".
+
+N3  LOW  "Mark unheard" now depends on the player connection
+    Where: ui/PodApp.kt:461, playback/PlayerClient.kt:53
+    What:  the checkbox sends MARK_UNHEARD through the MediaController; during the
+           first second after the activity starts, or if the service failed to bind,
+           it fails with "Player is connecting" although nothing is playing.
+    Fix:   fall back to store.membership() when the controller is absent or the
+           episode is not the current item.
+
+N4  LOW  "Copy info" copies the literal text "null" while notes are still loading
+    Where: ui/PodApp.kt:472 — guard on info == null (disable the button or copy
+           the title only).
+
+N5  LOW  A live, idle PlaybackService keeps its in-memory context after a restore
+    Where: data/LibraryStore.kt:86-90 writes the restored playback prefs; the
+           service's contextOrder/contextCursor are not refreshed and will overwrite
+           them at the next transition. Harmless; mention or send a RESET command.
+
+N6  LOW  Malformed-backup messages
+    Where: data/LibraryBackup.kt:156-163 — require() without a message yields
+           "Failed requirement." in the dialog.
+
+N7  LOW  Documentation debt (see F18): README lacks the backup/restore feature, the
+    version/signing story and the updated check counts; docs/device-checks.md item
+    14 still talks about 0.1.0 -> 0.2.0 and should cover the 3 -> 4 migration and
+    a backup/restore round trip between two installs.
+
+Still unverified (unchanged): the 19 device checks, the Android instrumented tests,
+and the quick-settings button placement on One UI.
+
+Recommended next steps
+----------------------
+  1. Fix N1 (five lines), optionally N2/N3.
+  2. Update README (version 1.0.0, 88/28 checks, backup/restore, signing) and
+     docs/device-checks.md; then commit everything.
+  3. Build with tools/build-apk.sh, install over the existing app, run the device
+     checks and record the results in docs/device-checks.md.

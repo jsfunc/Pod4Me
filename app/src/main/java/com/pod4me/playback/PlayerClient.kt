@@ -50,6 +50,9 @@ class PlayerClient(private val app: PodApplication) {
         val args = Bundle().apply { putString("id", id); putStringArrayList("order", ArrayList(order)); putLong("position", position) }
         requireController().sendCustomCommand(SessionCommand(PlaybackService.START, Bundle.EMPTY), args)
     }
+    fun markUnheard(id: String) {
+        requireController().sendCustomCommand(SessionCommand(PlaybackService.MARK_UNHEARD, Bundle.EMPTY), Bundle().apply { putString("id", id) })
+    }
     fun stop() { requireController().sendCustomCommand(SessionCommand(PlaybackService.STOP, Bundle.EMPTY), Bundle.EMPTY) }
     fun toggle() { requireController().let {
         if (it.isPlaying) it.pause() else {

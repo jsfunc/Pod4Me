@@ -49,17 +49,17 @@ class PlaybackService : MediaSessionService() {
         player.addListener(object : Player.Listener {
             override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
                 if (changing) return
-                oldPosition.mediaItem?.mediaId?.let { id ->
-                    val savedDuration = store.library.value.episode(id)?.duration ?: 0
-                    val duration = if (savedDuration > 0) savedDuration else player.currentTimeline.let { timeline ->
-                        if (oldPosition.mediaItemIndex in 0 until timeline.windowCount)
-                            timeline.getWindow(oldPosition.mediaItemIndex, Timeline.Window()).durationMs else 0L
-                    }
-                    scope.launch { safely { store.progress(id, oldPosition.positionMs, duration) } }
-                    if (newPosition.mediaItem?.mediaId == id) {
-                        scope.launch { safely { store.progress(id, newPosition.positionMs, duration) } }
-                    }
+                val oldId = oldPosition.mediaItem?.mediaId
+                val newId = newPosition.mediaItem?.mediaId
+                // A seek must never persist the position that the user just left.
+                if (oldId != null && oldId != newId && reason in setOf(Player.DISCONTINUITY_REASON_AUTO_TRANSITION, Player.DISCONTINUITY_REASON_SEEK)) {
+                    val timeline = player.currentTimeline
+                    val measured = if (oldPosition.mediaItemIndex in 0 until timeline.windowCount)
+                        timeline.getWindow(oldPosition.mediaItemIndex, Timeline.Window()).durationMs else 0L
+                    queueProgress(oldId, oldPosition.positionMs, measured)
                 }
+                if (newId != null && oldId == newId && reason == Player.DISCONTINUITY_REASON_SEEK)
+                    queueProgress(newId, newPosition.positionMs, player.duration)
             }
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 if (changing || mediaItem == null) return
@@ -69,7 +69,7 @@ class PlaybackService : MediaSessionService() {
                 if (index >= 0) contextCursor = index
                 persistContext(id)
                 val ep = store.library.value.episode(id)
-                if (ep != null) {
+                if (ep != null && reason != Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) {
                     changing = true
                     try { player.seekTo(Policy.resumePosition(ep.position, ep.duration)) }
                     finally { changing = false }
@@ -93,13 +93,36 @@ class PlaybackService : MediaSessionService() {
                     val commands = base.availableSessionCommands.buildUpon()
                         .add(SessionCommand(BACK10, Bundle.EMPTY)).add(SessionCommand(FORWARD10, Bundle.EMPTY))
                     if (controller.packageName == packageName) {
-                        commands.add(SessionCommand(START, Bundle.EMPTY)).add(SessionCommand(STOP, Bundle.EMPTY))
+                        commands.add(SessionCommand(START, Bundle.EMPTY)).add(SessionCommand(STOP, Bundle.EMPTY)).add(SessionCommand(MARK_UNHEARD, Bundle.EMPTY))
                     }
                     // System controls may seek/play/pause, but arbitrary external media cannot be injected.
                     val playerCommands = base.availablePlayerCommands.buildUpon()
                         .remove(Player.COMMAND_SET_MEDIA_ITEM).remove(Player.COMMAND_CHANGE_MEDIA_ITEMS).build()
                     return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                         .setAvailableSessionCommands(commands.build()).setAvailablePlayerCommands(playerCommands).build()
+                }
+                override fun onPlaybackResumption(session: MediaSession, controller: MediaSession.ControllerInfo): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+                    val result = SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
+                    scope.launch {
+                        try {
+                            operations.withLock {
+                                store.initialize()
+                                val id = requireNotNull(preferences.getString("current", null)) { "Choose an episode in Pod4Me first" }
+                                val ep = store.activate(id)
+                                player.setPlaybackSpeed(preferences.getFloat("speed", 1f).coerceIn(1f, 3f))
+                                contextOrder = decodeOrder(preferences.getString("order", "[]") ?: "[]")
+                                contextCursor = contextOrder.indexOf(id).takeIf { it >= 0 } ?: preferences.getInt("cursor", -1)
+                                started = true
+                                val before = preceding(id)
+                                val available = store.library.value.episodes.filter(Episode::isDownloaded).map(Episode::id).toSet()
+                                val next = Upcoming.plan(store.library.value.queue, contextOrder, contextCursor, id, before.map(Episode::id).toSet(), available)
+                                    .mapNotNull(store.library.value::episode)
+                                result.set(MediaSession.MediaItemsWithStartPosition((before + ep + next).map(::item), before.size,
+                                    Policy.resumePosition(ep.position, ep.duration)))
+                            }
+                        } catch (e: Exception) { result.setException(e) }
+                    }
+                    return result
                 }
                 override fun onCustomCommand(session: MediaSession, controller: MediaSession.ControllerInfo, customCommand: SessionCommand, args: Bundle): ListenableFuture<SessionResult> {
                     if (controller.packageName != packageName && customCommand.customAction !in setOf(BACK10, FORWARD10))
@@ -112,6 +135,10 @@ class PlaybackService : MediaSessionService() {
                                     val id = requireNotNull(args.getString("id"))
                                     val order = args.getStringArrayList("order") ?: arrayListOf(id)
                                     startEpisode(id, order, args.getLong("position", -1L))
+                                }
+                                MARK_UNHEARD -> {
+                                    val id = requireNotNull(args.getString("id")) { "Episode is missing" }
+                                    markUnheard(id)
                                 }
                                 STOP -> {
                                     saveProgressNow()
@@ -133,42 +160,41 @@ class PlaybackService : MediaSessionService() {
                 }
             }).setMediaButtonPreferences(ImmutableList.of(
                 CommandButton.Builder(CommandButton.ICON_SKIP_BACK_10).setDisplayName("Back 10 seconds")
-                    .setSessionCommand(SessionCommand(BACK10, Bundle.EMPTY)).setSlots(CommandButton.SLOT_OVERFLOW).build(),
+                    .setSessionCommand(SessionCommand(BACK10, Bundle.EMPTY)).setSlots(CommandButton.SLOT_BACK_SECONDARY).build(),
                 CommandButton.Builder(CommandButton.ICON_SKIP_FORWARD_10).setDisplayName("Forward 10 seconds")
-                    .setSessionCommand(SessionCommand(FORWARD10, Bundle.EMPTY)).setSlots(CommandButton.SLOT_OVERFLOW).build(),
+                    .setSessionCommand(SessionCommand(FORWARD10, Bundle.EMPTY)).setSlots(CommandButton.SLOT_FORWARD_SECONDARY).build(),
             )).build()
         scope.launch {
             store.library.map { library -> library.queue to library.episodes.filter { it.isDownloaded }.map { it.id } }
                 .distinctUntilChanged().collect { if (started) rebuildUpcoming() }
         }
         scope.launch {
-            while (isActive) { delay(5_000); if (player.isPlaying) saveProgressNow() }
+            while (isActive) { delay(5_000); if (player.isPlaying) operations.withLock { saveProgressNow() } }
         }
-        scope.launch {
-            safely {
-                store.initialize()
-                operations.withLock { if (!started) {
-                    val last = preferences.getString("current", null)
-                    val ep = store.library.value.episode(last)
-                    if (ep?.path != null && File(ep.path).isFile) {
-                        val order = decodeOrder(preferences.getString("order", "[]") ?: "[]")
-                        contextCursor = preferences.getInt("cursor", -1)
-                        startEpisode(ep.id, order, -1, play = false)
-                    }
-                } }
-            }
-        }
+        // Keep a cold session unloaded. Resumption loads the saved item only on Play,
+        // so simply opening the app cannot protect an expired file from deletion.
     }
 
-    private suspend fun startEpisode(id: String, order: List<String>, position: Long, play: Boolean = true) {
+    internal suspend fun markUnheard(id: String) {
+        changing = true
+        try {
+            if (player.currentMediaItem?.mediaId == id) player.seekTo(0)
+            store.membership(id, "unheard", true)
+        } finally { changing = false }
+    }
+
+    internal suspend fun startEpisode(id: String, order: List<String>, position: Long, play: Boolean = true) {
         saveProgressNow()
         val ep = store.activate(id)
+        player.setPlaybackSpeed(preferences.getFloat("speed", 1f).coerceIn(1f, 3f))
         started = true
         contextOrder = order.distinct()
         contextCursor = contextOrder.indexOf(id).takeIf { it >= 0 } ?: if (play) -1 else contextCursor
         changing = true
         try {
-            player.setMediaItem(item(ep), if (position >= 0) position else Policy.resumePosition(ep.position, ep.duration))
+            val before = preceding(id)
+            player.setMediaItems((before + ep).map(::item), before.size,
+                if (position >= 0) position else Policy.resumePosition(ep.position, ep.duration))
             player.prepare()
         } finally { changing = false }
         persistContext(id)
@@ -177,11 +203,14 @@ class PlaybackService : MediaSessionService() {
         if (play) player.play()
     }
 
+    private fun preceding(id: String): List<Episode> = contextOrder.take(contextOrder.indexOf(id).coerceAtLeast(0))
+        .mapNotNull(store.library.value::episode).filter(Episode::isDownloaded).takeLast(5)
+
     private fun rebuildUpcoming() {
         val id = player.currentMediaItem?.mediaId ?: return
         val library = store.library.value
         val history = (0..player.currentMediaItemIndex).map { player.getMediaItemAt(it).mediaId }.toSet()
-        val available = library.episodes.filter { it.path != null && File(it.path).isFile }.map { it.id }.toSet()
+        val available = library.episodes.filter { it.isDownloaded }.map { it.id }.toSet()
         val upcoming = Upcoming.plan(library.queue, contextOrder, contextCursor, id, history, available).mapNotNull(library::episode)
         val old = (player.currentMediaItemIndex + 1 until player.mediaItemCount).map { player.getMediaItemAt(it).mediaId }
         if (old == upcoming.map { it.id }) return
@@ -192,7 +221,7 @@ class PlaybackService : MediaSessionService() {
         } finally { changing = false }
     }
     private fun item(ep: Episode) = MediaItem.Builder().setMediaId(ep.id).setUri(Uri.fromFile(File(requireNotNull(ep.path))))
-        .setMediaMetadata(MediaMetadata.Builder().setTitle(ep.title).setArtist(store.library.value.feedName(ep.feedId)).setIsPlayable(true).build()).build()
+        .setMediaMetadata(MediaMetadata.Builder().setTitle(ep.title).setArtist(store.library.value.feedName(ep.feedId)).setArtworkUri(store.library.value.feedArtwork(ep.feedId)?.let(Uri::parse)).setIsPlayable(true).build()).build()
     private fun persistContext(id: String) {
         preferences.edit().putString("current", id).putString("order", JSONArray(contextOrder).toString()).putInt("cursor", contextCursor).apply()
     }
@@ -200,7 +229,11 @@ class PlaybackService : MediaSessionService() {
         val id = player.currentMediaItem?.mediaId ?: return
         val position = player.currentPosition
         val duration = player.duration
-        scope.launch { safely { store.progress(id, position, duration) } }
+        queueProgress(id, position, duration)
+    }
+    private fun queueProgress(id: String, position: Long, duration: Long) {
+        val epoch = store.progressEpoch(id)
+        scope.launch { safely { store.progress(id, position, duration, epoch) } }
     }
     private suspend fun saveProgressNow() {
         val id = player.currentMediaItem?.mediaId ?: return
@@ -214,13 +247,15 @@ class PlaybackService : MediaSessionService() {
         val id = player.currentMediaItem?.mediaId
         val position = player.currentPosition
         val duration = player.duration
-        if (id != null) app.scope.launch { try { store.progress(id, position, duration) } catch (e: Exception) { app.report(e) } }
+        val epoch = id?.let(store::progressEpoch) ?: 0L
+        if (id != null) app.scope.launch { try { store.progress(id, position, duration, epoch) } catch (e: Exception) { app.report(e) } }
         store.activeEpisode.set(null)
         session?.release(); player.release(); scope.cancel()
         super.onDestroy()
     }
     companion object {
         const val START = "com.pod4me.START"
+        const val MARK_UNHEARD = "com.pod4me.MARK_UNHEARD"
         const val STOP = "com.pod4me.STOP"
         const val BACK10 = "com.pod4me.BACK10"
         const val FORWARD10 = "com.pod4me.FORWARD10"

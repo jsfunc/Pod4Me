@@ -1,0 +1,1 @@
+ALTER TABLE feeds ADD COLUMN subscribed INTEGER NOT NULL DEFAULT 1 CHECK(subscribed IN (0,1));

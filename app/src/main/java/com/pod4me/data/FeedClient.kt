@@ -9,15 +9,14 @@ import java.util.concurrent.TimeUnit
 
 class FeedClient {
     private val client = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS).callTimeout(60, TimeUnit.SECONDS).build()
+        .readTimeout(30, TimeUnit.SECONDS).callTimeout(3, TimeUnit.MINUTES).build()
     suspend fun fetch(url: String): FeedParser.Feed = withContext(Dispatchers.IO) {
-        val request = Request.Builder().url(FeedParser.httpUrl(url)).header("User-Agent", "Pod4Me/0.1")
+        val request = Request.Builder().url(FeedParser.httpUrl(url)).header("User-Agent", "Pod4Me/${com.pod4me.BuildConfig.VERSION_NAME}")
             .header("Accept", "application/rss+xml, application/atom+xml, application/xml, text/xml").build()
         client.newCall(request).execute().use { response ->
             check(response.isSuccessful) { "Feed server returned HTTP ${response.code}" }
             val body = requireNotNull(response.body) { "Feed server returned no content" }
-            val bytes = body.byteStream().use { it.readNBytes(FeedParser.MAX_BYTES + 1) }
-            FeedParser.parse(bytes, response.request.url.toString())
+            body.byteStream().use { FeedParser.parse(it, response.request.url.toString()) }
         }
     }
 }

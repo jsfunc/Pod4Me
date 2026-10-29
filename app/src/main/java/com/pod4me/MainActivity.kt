@@ -35,14 +35,15 @@ class MainActivity : ComponentActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 model.onLaunch()
                 model.player.connect()
+                val ticker = launch { while (isActive) { delay(500); model.player.refresh() } }
                 try {
                     while (isActive) {
-                        delay(3_000)
+                        delay(20_000)
                         if (model.library.value.episodes.any { it.downloadId != null }) {
                             try { model.store.reconcileDownloads() } catch (e: Exception) { model.app.report(e) }
                         }
                     }
-                } finally { model.player.disconnect() }
+                } finally { ticker.cancel(); model.player.disconnect() }
             }
         }
     }

@@ -1,6 +1,9 @@
 package com.pod4me.domain;
 
 import java.nio.charset.StandardCharsets;
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.io.SequenceInputStream;
 import java.time.Instant;
 import java.util.*;
 
@@ -66,6 +69,46 @@ public final class CoreChecks {
         equal("<p>Full show notes</p>", parsed.items().get(0).description(), "rich content takes precedence");
         equal(Instant.parse("2002-10-02T08:00:00Z").toEpochMilli(), parsed.items().get(0).published(), "RSS publication time");
         equal(0L, parsed.items().get(1).published(), "undated remains undated");
+        equal(2, parsed.skippedItems(), "unsupported and unsafe enclosures are reported");
+        for (var zone : Map.of("PDT", "15", "PST", "16", "EDT", "12", "EST", "13", "UT", "08", "GMT", "08").entrySet()) {
+            var dated = parse(rss.replace("08:00:00 +0000", "08:00:00 " + zone.getKey() + " (publisher time)"));
+            equal(Instant.parse("2002-10-02T" + zone.getValue() + ":00:00Z").toEpochMilli(), dated.items().get(0).published(), "RFC zone " + zone.getKey());
+        }
+        equal(Instant.parse("2025-01-02T10:30:00Z").toEpochMilli(), parse(rss.replace("Wed, 02 Oct 2002 08:00:00 +0000", "2025-01-02T10:30:00")).items().get(0).published(), "naive ISO uses UTC");
+        equal(Instant.parse("2025-01-02T00:00:00Z").toEpochMilli(), parse(rss.replace("Wed, 02 Oct 2002 08:00:00 +0000", "2025-01-02")).items().get(0).published(), "date-only uses UTC");
+        equal("https://example.com/audio/my%20file%20%C3%A9.mp3?sig=x%2Fy&amp=1", parse(rss.replace("audio/first.mp3", "audio/my file é.mp3?sig=x%2Fy&amp;amp=1")).items().get(0).audioUrl(), "spaces and Unicode encoded without changing signed escapes");
+        equal("First", parse(rss.replace("<title>First</title>", "<itunes:title>Short</itunes:title><title>First</title>")).items().get(0).title(), "canonical title beats earlier itunes title");
+        equal("First", parse(rss.replace("<title>First</title>", "<title>First</title><itunes:title>Short</itunes:title>")).items().get(0).title(), "canonical title beats later itunes title");
+        equal(0L, parse(rss.replace("1:02:03", "3723000")).items().get(0).duration(), "absurd declared duration stays unknown");
+        equal(0L, parse(rss.replace("1:02:03", "1:99:03")).items().get(0).duration(), "invalid minute component stays unknown");
+        equal(0L, parse(rss.replace("1:02:03", "-1:02:03")).items().get(0).duration(), "negative hours rejected");
+        for (String namespace : List.of("http://backend.userland.com/rss2", "urn:publisher:rss")) {
+            equal(parsed, parse(rss.replace("<rss version", "<rss xmlns=\"" + namespace + "\" version")),
+                "default RSS namespace preserves all metadata: " + namespace);
+        }
+        String namespacedRss = """
+            <rss xmlns="urn:publisher:rss" xmlns:x="urn:other" xmlns:i="http://www.itunes.com/dtds/podcast-1.0.dtd">
+              <x:channel><x:title>Wrong channel</x:title></x:channel>
+              <channel><x:title>Wrong feed</x:title><title>Feed</title>
+                <x:image><x:url>/wrong.png</x:url></x:image><image><url>/cover.png</url></image>
+                <x:item><x:enclosure url="/wrong-item.mp3"/></x:item>
+                <item><x:guid>Wrong GUID</x:guid><guid>one</guid><x:title>Wrong title</x:title><i:title>Short</i:title><title>Full title</title>
+                  <x:enclosure url="/wrong.mp3"/><enclosure url="/right.mp3"/>
+                  <x:description>Wrong notes</x:description><description>Notes</description>
+                  <pubDate>2025-01-02</pubDate><i:duration>00:42</i:duration>
+                </item>
+              </channel>
+            </rss>
+            """;
+        FeedParser.Feed namespaced = parse(namespacedRss);
+        equal("Feed", namespaced.title(), "RSS namespace isolates feed title");
+        equal("https://example.com/cover.png", namespaced.artworkUrl(), "RSS namespace includes image URL");
+        equal(List.of(new FeedParser.Item("one", "Full title", "https://example.com/right.mp3", "Notes",
+            Instant.parse("2025-01-02T00:00:00Z").toEpochMilli(), 42000)), namespaced.items(), "RSS namespace isolates structural and metadata fields");
+        equal(0, namespaced.skippedItems(), "foreign items are not RSS episodes");
+        equal("Prefixed", parse("<r:rss xmlns:r='urn:publisher:rss'><r:channel><r:title>Prefixed</r:title></r:channel></r:rss>").title(),
+            "RSS namespace also works with prefixes");
+        rejects(() -> parse("<feed xmlns='urn:other'><title>Not Atom</title></feed>"), "Atom still requires the Atom namespace");
         String atom = """
             <feed xmlns="http://www.w3.org/2005/Atom"><title>Atom</title>
               <entry><id>urn:episode:1</id><title>Entry</title><published>2025-01-02T10:30:00+02:00</published>
@@ -79,7 +122,7 @@ public final class CoreChecks {
         equal(Instant.parse("2025-01-02T08:30:00Z").toEpochMilli(), entry.published(), "Atom timezone");
         rejects(() -> parse("<html><title>Not RSS</title></html>"), "reject webpage");
         rejects(() -> parse("<!DOCTYPE rss [<!ENTITY x SYSTEM 'file:///etc/passwd'>]><rss><channel><title>&x;</title></channel></rss>"), "reject external entity");
-        rejects(() -> FeedParser.parse(new byte[FeedParser.MAX_BYTES + 1], "https://example.com/feed"), "reject oversized feed");
+        rejects(() -> FeedParser.parse(oversizedStream(), "https://example.com/feed"), "streaming byte limit rejects oversized feeds");
         rejects(() -> FeedParser.httpUrl("javascript:alert(1)"), "reject JavaScript URL");
         rejects(() -> FeedParser.httpUrl("https://name:secret@example.com/feed"), "reject embedded credentials");
         equal("http://example.com/feed", FeedParser.httpUrl(" http://example.com/feed "), "legacy HTTP feed accepted");
@@ -106,7 +149,49 @@ public final class CoreChecks {
         equal("https://example.com/icon.png", parse("<feed xmlns='http://www.w3.org/2005/Atom'><icon>/icon.png</icon></feed>").artworkUrl(), "Atom icon artwork fallback");
         equal("https://example.com/safe.jpg", parse("<rss xmlns:itunes='http://www.itunes.com/dtds/podcast-1.0.dtd'><channel><itunes:image href='file:///private/image.png'/><image><url>/safe.jpg</url></image></channel></rss>").artworkUrl(), "unsafe artwork ignored in favor of safe RSS image");
         equal("", parse("<rss><channel><item><image><url>https://example.com/episode.jpg</url></image></item></channel></rss>").artworkUrl(), "episode artwork does not replace feed artwork");
+        FeedParser.Feed bigFeed = largeFeed();
+        equal(2200, bigFeed.items().size(), "feed larger than 8 MB imports every episode");
+        equal("2200", bigFeed.items().get(2199).guid(), "large feed is not truncated");
+        equal("x".repeat(4096), bigFeed.items().get(0).description(), "large feed preserves full episode notes");
+        equal("Nested text", parse("<feed xmlns='http://www.w3.org/2005/Atom'><entry><id>nested</id><content type='xhtml'><div>Nested <b>text</b></div></content><link rel='enclosure' href='https://example.com/audio.mp3'/></entry></feed>").items().get(0).description(), "streaming parser preserves nested Atom content text");
+        rejects(() -> parse("<rss><item><title>Missing channel</title></item></rss>"), "missing RSS channel rejected");
+        equal("Café", FeedParser.parse("<?xml version='1.0' encoding='UTF-16'?><rss><channel><title>Café</title></channel></rss>".getBytes(StandardCharsets.UTF_16), "https://example.com/feed").title(), "UTF-16 feed encoding is respected");
+        rejects(() -> FeedParser.parse("<?xml version='1.0' encoding='UTF-16'?><!DOCTYPE rss [<!ENTITY bad 'expanded'>]><rss><channel><title>&bad;</title></channel></rss>".getBytes(StandardCharsets.UTF_16), "https://example.com/feed"), "UTF-16 DTD rejected before entity expansion");
         System.out.println("PASS: " + checks + " core checks (expiry, protection, heard threshold, resume, queue, RSS, Atom, feed lists, artwork, invalid input)");
+    }
+    private static FeedParser.Feed largeFeed() throws Exception {
+        final long[] size = {0};
+        var parts = new Enumeration<InputStream>() {
+            private int part;
+            public boolean hasMoreElements() { return part <= 2201; }
+            public InputStream nextElement() {
+                if (!hasMoreElements()) throw new NoSuchElementException();
+                int current = part++;
+                String xml = current == 0 ? "<rss><channel><title>Large history</title>" : current == 2201 ? "</channel></rss>" :
+                    "<item><guid>" + current + "</guid><title>Episode " + current + "</title><enclosure url='https://example.com/" + current + ".mp3'/><description>" + "x".repeat(4096) + "</description></item>";
+                byte[] bytes = xml.getBytes(StandardCharsets.UTF_8);
+                size[0] += bytes.length;
+                return new ByteArrayInputStream(bytes);
+            }
+        };
+        try (InputStream input = new SequenceInputStream(parts)) {
+            var feed = FeedParser.parse(input, "https://example.com/feed");
+            equal(true, size[0] > 8 * 1024 * 1024, "large regression fixture exceeds the former limit");
+            return feed;
+        }
+    }
+    private static InputStream oversizedStream() {
+        return new InputStream() {
+            private long remaining = (long) FeedParser.MAX_BYTES + 1;
+            @Override public int read() { if (remaining == 0) return -1; remaining--; return ' '; }
+            @Override public int read(byte[] bytes, int offset, int length) {
+                if (remaining == 0) return -1;
+                int size = (int) Math.min(length, remaining);
+                Arrays.fill(bytes, offset, offset + size, (byte) ' ');
+                remaining -= size;
+                return size;
+            }
+        };
     }
     private static FeedParser.Feed parse(String xml) throws Exception { return FeedParser.parse(xml.getBytes(StandardCharsets.UTF_8), "https://example.com/feed.xml"); }
     private static void equal(Object expected, Object actual, String message) {

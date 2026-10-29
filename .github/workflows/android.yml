@@ -25,7 +25,7 @@ jobs:
           java tools/CoreTestLauncher.java
           python3 tools/check_schema.py
       - name: Compile, test and lint
-        run: ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --no-daemon
+        run: ./gradlew :app:testDebugUnitTest :app:lintDebug :app:lintRelease :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon
       - name: Prepare APK download
         run: |
           mkdir -p dist
@@ -43,5 +43,5 @@ jobs:
           name: Android-test-reports
           path: |
             app/build/reports/tests/
-            app/build/reports/lint-results-debug.html
+            app/build/reports/lint-results-*.html
           if-no-files-found: ignore

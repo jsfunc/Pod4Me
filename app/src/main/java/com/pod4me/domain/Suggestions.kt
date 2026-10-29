@@ -9,7 +9,8 @@ data class Suggestion(val url: String, val kind: String, val title: String = "",
 
 object Suggestions {
     private fun encode(value: String) = URLEncoder.encode(value, StandardCharsets.UTF_8.name())
-    private fun decode(value: String) = URLDecoder.decode(value, StandardCharsets.UTF_8.name())
+    private fun decode(value: String) = try { URLDecoder.decode(value, StandardCharsets.UTF_8.name()) }
+        catch (_: IllegalArgumentException) { throw IllegalArgumentException("Suggestion contains invalid URL encoding") }
     fun feed(feed: Feed) = "Podcast suggestion: ${feed.name}\n${feed.url}\npod4me://feed?url=${encode(feed.url)}"
     fun episode(episode: Episode, feed: Feed?) = buildString {
         append("Episode suggestion: ${episode.title}\n${episode.audioUrl}\n")
@@ -20,11 +21,11 @@ object Suggestions {
         require(text.length <= 64_000) { "This shared message is too long" }
         val deep = Regex("pod4me://[^\\s<>]+", RegexOption.IGNORE_CASE).find(text)?.value
         if (deep != null) {
-            val uri = URI.create(deep)
+            val uri = try { URI.create(deep) } catch (_: IllegalArgumentException) { throw IllegalArgumentException("This Pod4Me suggestion link is malformed") }
             val query = (uri.rawQuery ?: "").split('&').filter { '=' in it }.associate {
                 decode(it.substringBefore('=')) to decode(it.substringAfter('='))
             }
-            val kind = requireNotNull(uri.host).lowercase()
+            val kind = requireNotNull(uri.host) { "Suggestion is missing its feed or episode type" }.lowercase()
             require(kind == "feed" || kind == "episode") { "Unknown Pod4Me suggestion type" }
             return Suggestion(FeedParser.httpUrl(requireNotNull(query["url"]) { "Suggestion is missing a URL" }), kind,
                 query["title"].orEmpty(), query["feed"]?.let(FeedParser::httpUrl))

@@ -7,6 +7,9 @@ import com.pod4me.data.LibraryStore
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Before
+import org.junit.After
+import android.app.DownloadManager
+import org.robolectric.Shadows.shadowOf
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -21,6 +24,8 @@ class LibraryStoreTest {
     private lateinit var helper: LibraryDatabase
     private lateinit var file: File
     private lateinit var episode: Episode
+
+    @After fun close() { helper.close(); store.close() }
 
     @Before fun setup() = runBlocking {
         val context = RuntimeEnvironment.getApplication()
@@ -110,4 +115,207 @@ class LibraryStoreTest {
         store.saveFeed("https://example.com/feed", FeedParser.Feed("Publisher", emptyList()), episode.feedId)
         assertNull(store.library.value.feedArtwork(episode.feedId))
     }
+    @Test fun unsubscribePreservesDownloadsHistoryProtectionAndQueue() = runBlocking {
+        store.rate(episode.id, 5)
+        store.bookmark(episode.id, 1000, "Keep")
+        store.progress(episode.id, 5000, 10000)
+        store.membership(episode.id, "4ever", true)
+        store.enqueue(episode.id)
+        store.activate(episode.id)
+        store.unsubscribe(episode.feedId)
+        store.initialize()
+        val library = store.library.value
+        assertTrue(library.subscriptions.isEmpty())
+        assertTrue(library.latestEpisodes.isEmpty())
+        assertEquals("Feed", library.feedName(episode.feedId))
+        assertFalse(library.feeds.single().subscribed)
+        assertEquals(5, library.episodes.single().stars)
+        assertEquals(5000L, library.episodes.single().position)
+        assertTrue(library.episodes.single().protected)
+        assertEquals("Keep", library.bookmarks.single().name)
+        assertEquals(listOf(episode.id), library.queue)
+        assertEquals(episode.id, store.activeEpisode.get())
+        assertTrue(file.exists())
+    }
+    @Test fun refreshInFlightDoesNotUndoUnsubscribe() = runBlocking {
+        store.unsubscribe(episode.feedId)
+        store.saveFeed("https://example.com/feed", FeedParser.Feed("Remote", listOf(
+            FeedParser.Item("new", "New episode", "https://example.com/new.mp3", "", 0, 0))), episode.feedId)
+        assertTrue(store.library.value.subscriptions.isEmpty())
+        assertEquals(1, store.library.value.episodes.size)
+    }
+    @Test fun explicitResubscriptionReusesSavedFeedAndEpisodes() = runBlocking {
+        store.editFeed(episode.feedId, "Custom name", null, setOf("4ever"))
+        store.rate(episode.id, 4)
+        store.unsubscribe(episode.feedId)
+        val id = store.saveFeed("https://example.com/feed", FeedParser.Feed("Remote", listOf(
+            FeedParser.Item("guid", "Updated episode", "https://example.com/audio.mp3", "Info", 100, 10000))))
+        assertEquals(episode.feedId, id)
+        assertEquals(1, store.library.value.feeds.size)
+        assertEquals("Custom name", store.library.value.subscriptions.single().name)
+        assertEquals(setOf("4ever"), store.library.value.subscriptions.single().defaults)
+        assertEquals(episode.id, store.library.value.latestEpisodes.single().id)
+        assertEquals(4, store.library.value.episodes.single().stars)
+        assertTrue(file.exists())
+    }
+    @Test fun delayedProgressCannotUndoExplicitUnheardReset() = runBlocking {
+        store.progress(episode.id, 9600, 10000)
+        val oldEpoch = store.progressEpoch(episode.id)
+        store.membership(episode.id, "unheard", true)
+        store.progress(episode.id, 9600, 10000, oldEpoch)
+        val reset = store.library.value.episode(episode.id)!!
+        assertFalse(reset.heard); assertEquals(0L, reset.position)
+        store.progress(episode.id, 9600, 10000, store.progressEpoch(episode.id))
+        assertTrue(store.library.value.episode(episode.id)!!.heard)
+    }
+    @Test fun measuredDurationAndLightweightSnapshots() = runBlocking {
+        val otherFeed = store.saveFeed("https://example.com/other", FeedParser.Feed("Other", listOf(
+            FeedParser.Item("other", "Other", "https://example.com/other.mp3", "Notes".repeat(100_000), 0, 100))))
+        val other = store.library.value.episodes.single { it.feedId == otherFeed }
+        val revision = store.library.value.catalogueRevision
+        store.progress(episode.id, 9600, 20000)
+        val current = store.library.value.episode(episode.id)!!
+        assertFalse(current.heard); assertEquals(20000L, current.duration)
+        assertSame(other, store.library.value.episode(other.id))
+        assertEquals(revision, store.library.value.catalogueRevision)
+        assertEquals("", other.description)
+        assertEquals(500_000, store.description(other.id).length)
+    }
+    @Test fun noOpReconciliationKeepsSameSnapshot() = runBlocking {
+        val before = store.library.value
+        store.reconcileDownloads()
+        assertSame(before, store.library.value)
+    }
+    @Test fun unchangedRefreshDoesNotRewriteEpisodeNotes() = runBlocking {
+        val db = helper.writableDatabase
+        db.execSQL("CREATE TABLE audit_updates(count INTEGER)")
+        db.execSQL("INSERT INTO audit_updates VALUES(0)")
+        db.execSQL("CREATE TRIGGER count_updates AFTER UPDATE ON episodes BEGIN UPDATE audit_updates SET count=count+1; END")
+        store.saveFeed("https://example.com/feed", FeedParser.Feed("Feed", listOf(
+            FeedParser.Item("guid", "Episode", "https://example.com/audio.mp3", "Info", 100, 10_000))), episode.feedId)
+        db.rawQuery("SELECT count FROM audit_updates", null).use { it.moveToFirst(); assertEquals(0, it.getInt(0)) }
+    }
+    @Test fun backupRoundTripMergesWithoutLosingAudioAndDeduplicates() = runBlocking {
+        store.rate(episode.id, 5); store.progress(episode.id, 4500, 10000)
+        store.bookmark(episode.id, 1234, "Moment"); store.membership(episode.id, "4ever", true)
+        store.createList("Personal")
+        val list = store.library.value.lists.single { !it.system }
+        store.membership(episode.id, list.id, true)
+        store.editFeed(episode.feedId, "Custom feed", 90, setOf(list.id))
+        store.enqueue(episode.id)
+        val output = java.io.ByteArrayOutputStream()
+        store.exportLibrary(output)
+        val backup = output.toString("UTF-8")
+        assertFalse(backup.contains("manager_id")); assertFalse(backup.contains(file.absolutePath))
+        store.rate(episode.id, 1); store.progress(episode.id, 10, 10000)
+        repeat(2) { store.restoreLibrary(backup.byteInputStream()) }
+        val after = store.library.value.episode(episode.id)!!
+        assertEquals(5, after.stars); assertEquals(4500L, after.position); assertEquals(file.absolutePath, after.path)
+        assertTrue(file.exists()); assertEquals(1, store.library.value.bookmarks.size)
+        assertEquals(listOf(episode.id), store.library.value.queue)
+        assertTrue(after.protected); assertTrue(list.id in after.lists)
+        assertEquals("Custom feed", store.library.value.feedName(episode.feedId))
+    }
+    @Test fun invalidBackupRollsBackEveryChange() = runBlocking {
+        val output = java.io.ByteArrayOutputStream(); store.exportLibrary(output)
+        val invalid = output.toString("UTF-8").replace("\"Feed\"", "\"Changed\"").replace("\"stars\":0", "\"stars\":9")
+        try { store.restoreLibrary(invalid.byteInputStream()); fail("Invalid rating must fail") } catch (_: IllegalArgumentException) { }
+        store.initialize()
+        assertEquals("Feed", store.library.value.feedName(episode.feedId))
+        assertTrue(file.exists())
+    }
+    @Test fun largeLibraryProgressKeepsOtherObjectsAndNotesOutOfState() = runBlocking {
+        val many = (1..10_000).map { FeedParser.Item("g$it", "Episode $it", "https://example.com/$it.mp3", "notes".repeat(400), it.toLong(), 10000) }
+        store.saveFeed("https://example.com/large", FeedParser.Feed("Large", many))
+        val before = store.library.value
+        val started = System.nanoTime()
+        store.progress(episode.id, 2000, 10000)
+        val after = store.library.value
+        assertEquals(10001, after.episodes.size)
+        assertTrue(after.episodes.all { it.description.isEmpty() })
+        assertSame(before.episodes.last(), after.episodes.last())
+        assertEquals(before.catalogueRevision, after.catalogueRevision)
+        println("10,001 episodes, 20 MB notes: progress save " + (System.nanoTime() - started) / 1_000_000 + " ms")
+    }
+
+    @Test fun completedDownloadRetainsManagerIdUntilAudioDeletion() = runBlocking {
+        store.deleteAudio(episode.id)
+        store.download(episode.id)
+        val id = store.library.value.episode(episode.id)!!.downloadId!!
+        val manager = RuntimeEnvironment.getApplication().getSystemService(DownloadManager::class.java)
+        val downloads = shadowOf(manager)
+        shadowOf(downloads.getRequest(id)).setStatus(DownloadManager.STATUS_SUCCESSFUL)
+        file.writeBytes(byteArrayOf(1, 2, 3))
+        store.reconcileDownloads()
+        val completed = store.library.value.episode(episode.id)!!
+        assertNull(completed.downloadId); assertEquals(id, completed.managerId)
+        assertEquals(1, downloads.requestCount); assertTrue(file.exists())
+        val snapshot = store.library.value
+        store.reconcileDownloads(); assertSame(snapshot, store.library.value)
+        store.deleteAudio(episode.id)
+        assertFalse(file.exists()); assertEquals(0, downloads.requestCount)
+        assertNull(store.library.value.episode(episode.id)!!.managerId)
+    }
+    @Test fun canceledRemovedAndFailedDownloadsCanBeRetried() = runBlocking {
+        store.deleteAudio(episode.id)
+        val manager = RuntimeEnvironment.getApplication().getSystemService(DownloadManager::class.java)
+        val downloads = shadowOf(manager)
+        store.download(episode.id); store.cancelDownload(episode.id)
+        assertEquals(0, downloads.requestCount); assertNull(store.library.value.episode(episode.id)!!.downloadId)
+        store.download(episode.id)
+        manager.remove(store.library.value.episode(episode.id)!!.downloadId!!)
+        store.reconcileDownloads()
+        assertTrue(store.library.value.episode(episode.id)!!.error!!.contains("removed"))
+        store.download(episode.id)
+        shadowOf(downloads.getRequest(store.library.value.episode(episode.id)!!.downloadId!!)).setStatus(DownloadManager.STATUS_FAILED)
+        store.reconcileDownloads()
+        assertNull(store.library.value.episode(episode.id)!!.downloadId)
+        assertNotNull(store.library.value.episode(episode.id)!!.error)
+        assertEquals(0, downloads.requestCount)
+    }
+    @Test fun restoreOnEmptyLibraryRemapsReferencesAndOmitsDeviceState() = runBlocking {
+        store.rate(episode.id, 4); store.bookmark(episode.id, 2222, "Keep"); store.enqueue(episode.id)
+        store.membership(episode.id, "4ever", true)
+        val context = RuntimeEnvironment.getApplication()
+        context.getSharedPreferences("playback", 0).edit().putString("current", episode.id)
+            .putString("order", org.json.JSONArray(listOf(episode.id)).toString()).putFloat("speed", 1.5f).commit()
+        val output = java.io.ByteArrayOutputStream(); store.exportLibrary(output)
+        helper.writableDatabase.execSQL("DELETE FROM episodes")
+        helper.writableDatabase.execSQL("DELETE FROM feeds")
+        store.initialize(); store.restoreLibrary(output.toByteArray().inputStream())
+        val restored = store.library.value.episodes.single()
+        assertNotEquals(episode.id, restored.id); assertEquals(4, restored.stars)
+        assertNull(restored.path); assertNull(restored.downloadId); assertNull(restored.managerId)
+        assertTrue(restored.protected); assertEquals(restored.id, store.library.value.queue.single())
+        assertEquals(restored.id, store.library.value.bookmarks.single().episodeId)
+        assertEquals("Info", store.description(restored.id))
+        val prefs = context.getSharedPreferences("playback", 0)
+        assertEquals(restored.id, prefs.getString("current", null)); assertEquals(1.5f, prefs.getFloat("speed", 1f))
+    }
+
+    @Test fun sharedAudioStillWorksAfterPortableRestore() = runBlocking {
+        store.addSharedAudio("https://example.com/shared.mp3", "Shared")
+        val output = java.io.ByteArrayOutputStream(); store.exportLibrary(output)
+        helper.writableDatabase.execSQL("DELETE FROM episodes")
+        helper.writableDatabase.execSQL("DELETE FROM feeds")
+        store.initialize()
+        assertTrue(store.library.value.feeds.isEmpty())
+        store.restoreLibrary(output.toByteArray().inputStream())
+        assertEquals("shared", store.library.value.feeds.single { it.url.isEmpty() }.id)
+        val another = store.addSharedAudio("https://example.com/another.mp3", "Another")
+        store.download(another)
+        assertNotNull(store.library.value.episode(another)!!.downloadId)
+        assertEquals(2, store.library.value.episodes.count { it.feedId == "shared" })
+    }
+    @Test fun restoreRejectsDeviceSpecificFieldsAndMissingReferences() = runBlocking {
+        val output = java.io.ByteArrayOutputStream(); store.exportLibrary(output)
+        val json = org.json.JSONObject(output.toString("UTF-8"))
+        json.getJSONArray("episodes").getJSONObject(0).put("path", "/other/file")
+        try { store.restoreLibrary(json.toString().byteInputStream()); fail("Paths must not be restored") } catch (_: IllegalArgumentException) { }
+        json.getJSONArray("episodes").getJSONObject(0).remove("path")
+        json.getJSONArray("episodes").getJSONObject(0).put("feed_id", "missing")
+        try { store.restoreLibrary(json.toString().byteInputStream()); fail("Orphans must not be restored") } catch (_: IllegalArgumentException) { }
+        assertTrue(file.exists()); assertEquals(1, store.library.value.episodes.size)
+    }
+
 }

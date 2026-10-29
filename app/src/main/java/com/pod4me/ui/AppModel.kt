@@ -12,6 +12,10 @@ import com.pod4me.playback.PlayerClient
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
+import com.pod4me.data.LibraryBackup
 import java.io.File
 import kotlin.math.roundToLong
 
@@ -33,15 +37,13 @@ class AppModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch {
-            while (isActive) { delay(500); player.refresh() }
-        }
-        viewModelScope.launch {
-            library.collect { updateStorage() }
+            library.map { state -> state.episodes.map { Triple(it.id, it.path, it.downloadId) } }.distinctUntilChanged()
+                .flowOn(Dispatchers.Default).collect { updateStorage() }
         }
     }
     fun action(block: suspend () -> Unit) { viewModelScope.launch {
         try { block() }
-        catch (e: SQLiteConstraintException) { app.report(IllegalArgumentException("That name is already in use. Choose another name.")) }
+        catch (e: SQLiteConstraintException) { app.report(IllegalArgumentException("The library changed while this action was being applied. Reopen the item and try again.")) }
         catch (e: Exception) { app.report(e) }
     } }
     suspend fun onLaunch() {
@@ -54,7 +56,7 @@ class AppModel(application: Application) : AndroidViewModel(application) {
         mutableStorage.value = StorageUi((bytes / 1e9).roundToLong(), (StatFs(directory.absolutePath).availableBytes / 1e9).roundToLong())
     }
     fun refresh(feed: Feed? = null) = network {
-        val targets = (feed?.let(::listOf) ?: library.value.feeds).filter { it.url.isNotBlank() }
+        val targets = (feed?.let(::listOf) ?: library.value.subscriptions).filter { it.subscribed && it.url.isNotBlank() }
         var successes = 0
         val failures = mutableListOf<String>()
         for (target in targets) {
@@ -82,7 +84,7 @@ class AppModel(application: Application) : AndroidViewModel(application) {
         var added = 0; var skipped = 0
         val failed = mutableListOf<String>()
         for (url in urls) {
-            if (library.value.feeds.any { it.url == url }) { skipped++; continue }
+            if (library.value.subscriptions.any { it.url == url }) { skipped++; continue }
             try { subscribeNow(url); added++ }
             catch (e: CancellationException) { throw e }
             catch (e: Exception) { failed += "$url: ${e.message}" }
@@ -90,9 +92,33 @@ class AppModel(application: Application) : AndroidViewModel(application) {
         mutableNotice.value = "$added added, $skipped already subscribed" + if (failed.isEmpty()) "" else ". Failed:\n${failed.joinToString("\n")}"
     }
     fun exportFeeds(uri: Uri) = action {
-        val lines = library.value.feeds.filter { it.url.isNotBlank() }.map { FeedListFormat.line(it.url, it.name) }
+        val lines = library.value.subscriptions.map { FeedListFormat.line(it.url, it.name) }
         withContext(Dispatchers.IO) { requireNotNull(app.contentResolver.openOutputStream(uri, "wt")).bufferedWriter().use { it.write(lines.joinToString("\n", postfix = if (lines.isEmpty()) "" else "\n")) } }
         mutableNotice.value = "Feed list exported"
+    }
+    fun exportLibrary(uri: Uri) = network {
+        withContext(Dispatchers.IO) {
+            requireNotNull(app.contentResolver.openOutputStream(uri, "wt")).use { store.exportLibrary(it) }
+        }
+        mutableNotice.value = "Library backup saved. Audio files are not included."
+    }
+    fun restoreLibrary(uri: Uri) = network {
+        require(store.activeEpisode.get() == null) { "Stop playback in Player before restoring a backup" }
+        withContext(Dispatchers.IO) {
+            val temporary = File.createTempFile("restore-", ".json", app.cacheDir)
+            try {
+                requireNotNull(app.contentResolver.openInputStream(uri)).use { input -> temporary.outputStream().use { output ->
+                    val buffer = ByteArray(8192); var total = 0L
+                    while (true) {
+                        val count = input.read(buffer); if (count < 0) break
+                        total += count; require(total <= LibraryBackup.MAX_BYTES) { "Backup exceeds 256 MB" }
+                        output.write(buffer, 0, count)
+                    }
+                } }
+                temporary.inputStream().use { store.restoreLibrary(it) }
+            } finally { temporary.delete() }
+        }
+        mutableNotice.value = "Library restored. Existing audio was kept; missing audio can be downloaded again from Latest or Queue."
     }
     fun receive(text: String) { try { mutableSuggestion.value = Suggestions.parse(text) } catch (e: Exception) { app.report(e) } }
     fun dismissSuggestion() { mutableSuggestion.value = null }

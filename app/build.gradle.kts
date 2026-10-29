@@ -10,20 +10,36 @@ android {
         applicationId = "com.pod4me"
         minSdk = 34
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 8
+        versionName = "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
+    signingConfigs {
+        create("personal") {
+            storeFile = file(System.getenv("POD4ME_KEYSTORE") ?: "${System.getProperty("user.home")}/.android/pod4me-v1.keystore")
+            storePassword = System.getenv("POD4ME_STORE_PASSWORD") ?: "android"
+            keyAlias = System.getenv("POD4ME_KEY_ALIAS") ?: "androiddebugkey"
+            keyPassword = System.getenv("POD4ME_KEY_PASSWORD") ?: storePassword
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            isDebuggable = false
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("personal")
+        }
+    }
     testOptions { unitTests.isIncludeAndroidResources = true }
     lint { abortOnError = true }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
 }
+kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
+
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2025.10.01"))
     implementation("androidx.activity:activity-compose:1.11.0")

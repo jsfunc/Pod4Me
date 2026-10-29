@@ -6,9 +6,13 @@ public final class Policy {
     private Policy() {}
 
     public static Long downloadExpiry(long downloadedAt, Integer days) {
+        validateExpiryDays(days);
         if (days == null) return null;
-        if (days < 1 || days > 36500) throw new IllegalArgumentException("Expiry must be 1–36500 days or forever");
         return Math.addExact(downloadedAt, Math.multiplyExact(days.longValue(), DAY));
+    }
+
+    public static void validateExpiryDays(Integer days) {
+        if (days != null && (days < 1 || days > 36500)) throw new IllegalArgumentException("Expiry must be 1–36500 days or forever");
     }
 
     public static boolean isHeard(long position, long duration) {

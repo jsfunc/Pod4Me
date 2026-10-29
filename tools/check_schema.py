@@ -55,6 +55,14 @@ class SchemaTests(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             self.db.execute("INSERT INTO memberships VALUES('missing','4ever')")
 
+    def test_manager_id_migration_preserves_download_and_history(self):
+        with sqlite3.connect(":memory:") as old:
+            old.executescript((ROOT / "app/src/main/assets/schema.sql").read_text().replace(", manager_id INTEGER", ""))
+            old.execute("INSERT INTO feeds(id,url,name) VALUES('f','https://example.com','Feed')")
+            old.execute("INSERT INTO episodes(id,feed_id,guid,title,audio_url,description,published,path,download_id,stars,position) VALUES('e','f','g','Episode','https://example.com/a.mp3','Notes',1,'/audio',12,5,9500)")
+            old.executescript((ROOT / "app/src/main/assets/migration_3_4.sql").read_text())
+            self.assertEqual(('/audio', 12, None, 5, 9500), old.execute("SELECT path,download_id,manager_id,stars,position FROM episodes").fetchone())
+
     def test_android_xml_is_well_formed(self):
         for path in (ROOT / "app/src/main").rglob("*.xml"):
             ET.parse(path)
@@ -73,6 +81,27 @@ class SchemaTests(unittest.TestCase):
             self.assertEqual([('ep', '4ever')], old.execute("SELECT * FROM memberships").fetchall())
             old.execute("UPDATE feeds SET artwork_url='https://example.com/cover.jpg'")
             self.assertEqual('https://example.com/cover.jpg', old.execute("SELECT artwork_url FROM feeds").fetchone()[0])
+
+    def test_subscription_migration_preserves_data_and_can_unsubscribe(self):
+        for version in (1, 2):
+            with self.subTest(version=version), sqlite3.connect(":memory:") as old:
+                old.execute("PRAGMA foreign_keys=ON")
+                artwork = ", artwork_url TEXT" if version == 2 else ""
+                old.executescript("CREATE TABLE feeds(id TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, name TEXT NOT NULL, expiry_days INTEGER, error TEXT" + artwork + ");" +
+                                 (ROOT / "app/src/main/assets/schema.sql").read_text().partition(";")[2])
+                old.execute("INSERT INTO feeds(id,url,name,expiry_days) VALUES('f','https://example.com/feed','My name',30)")
+                old.execute("INSERT INTO episodes(id,feed_id,guid,title,audio_url,description,published,path,stars) VALUES('e','f','g','Saved','https://example.com/audio','',0,'/audio',5)")
+                old.execute("INSERT INTO memberships VALUES('e','4ever')")
+                old.execute("INSERT INTO queue VALUES('e',0)")
+                if version == 1:
+                    old.executescript((ROOT / "app/src/main/assets/migration_1_2.sql").read_text())
+                old.executescript((ROOT / "app/src/main/assets/migration_2_3.sql").read_text())
+                self.assertEqual(1, old.execute("SELECT subscribed FROM feeds").fetchone()[0])
+                old.execute("UPDATE feeds SET subscribed=0 WHERE id='f'")
+                self.assertEqual([], old.execute("SELECT url FROM feeds WHERE subscribed=1 AND url<>''").fetchall())
+                self.assertEqual(('/audio', 5), old.execute("SELECT path,stars FROM episodes").fetchone())
+                self.assertEqual([('e', '4ever')], old.execute("SELECT * FROM memberships").fetchall())
+                self.assertEqual([('e', 0)], old.execute("SELECT * FROM queue").fetchall())
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

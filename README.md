@@ -4,7 +4,11 @@ A local Android podcast manager for a Galaxy S24 and newer phones. Native Kotlin
 
 ## Build status
 
-The latest source is 0.2.1. It includes compact icon controls, titled feed exports, and feed artwork, plus a fix for an Android-specific import/export regex error. Its 65 dependency-free core checks and eight standalone SQLite/XML checks pass. The updated Android build and on-device checks are pending; earlier builds passed compilation, unit tests, and lint.
+The v1 source is **1.0.0 (version code 8)**. It addresses the audit's playback, library performance, parser, download cleanup, backup and release-packaging findings while retaining the compact layouts. Validation results and remaining device checks are recorded in [v1 verification](docs/v1-verification.md).
+
+**Follow-up source correction:** RSS documents using a default namespace are now supported, with namespace isolation retained. The shared-feed restore already keeps ID `shared`; its regression test now also starts a subsequent download. The corrected source passes 96 core checks and 35 unit tests. The corrected APK was rebuilt successfully and verified; `dist/Pod4Me.apk` includes this correction.
+
+The signed v1 APK was built successfully on 2026-10-29 via the normal-terminal build script: 35 Android unit tests passed, release lint reported zero errors (20 warnings), and Android device tests compiled. Independent APK checks confirmed version 1.0.0, a non-debuggable application and the same signing certificate as the previous local APK. The S24 device checks remain pending.
 
 ## Build an installable APK
 
@@ -20,13 +24,15 @@ cd /home/aurelien/repo/pod4me
 
 Review and accept the Android SDK licenses when prompted. The setup script installs command-line tools, SDK platform 36, build tools 35.0.0, and platform-tools in `~/Android/Sdk`. Gradle and dependencies are cached in `~/.gradle`; both locations are shared with future projects. Set `ANDROID_HOME` or `GRADLE_USER_HOME` to override them. A full JDK 17 is required; a Java runtime without compiler tools is insufficient.
 
-The build script runs unit tests and lint before producing **`dist/Pod4Me.apk`** and its SHA-256 checksum. The APK supports Android 14+ (minimum API 34, compile/target API 36), including Android 17. Compatibility with the specific One UI 9 device still needs testing.
+The build script runs core/schema checks, Android unit tests, release lint, release assembly and compilation of device tests. It produces a signed, non-debuggable **`dist/Pod4Me.apk`**, `dist/Pod4Me-1.0.0.apk`, and SHA-256 checksums. The APK supports Android 14+ (minimum API 34, compile/target API 36), including Android 17. Compatibility with the specific One UI 9 device still needs testing.
 
-Transfer the APK to the phone and open it, allowing installation from the app used to open the file. The local debug signing key normally resides at `~/.android/debug.keystore`; keep that key to install subsequent local builds as updates without uninstalling and losing app data.
+Transfer the APK to the phone and open it, allowing installation from the app used to open the file. For existing local installs, the script copies `~/.android/debug.keystore` once to the dedicated `~/.android/pod4me-v1.keystore`. This preserves the existing signing certificate, so v1 installs as an update without uninstalling or losing data. The release APK is **not debuggable**, even though its certificate is retained from earlier builds. Keep a private backup of that keystore. The script also compares the certificate with an existing `dist/Pod4Me.apk` and stops on mismatch.
+
+To use an existing personal keystore instead, set `POD4ME_KEYSTORE`, `POD4ME_STORE_PASSWORD`, `POD4ME_KEY_ALIAS` and `POD4ME_KEY_PASSWORD`. Its certificate must match the installed app to update it. Changing certificates is a separate migration; do not uninstall your current app to resolve a signing error.
 
 To download directly on a phone connected to the same Wi-Fi, run `python3 tools/serve-apk.py` in your normal terminal and open the printed URL on the phone. The server exposes only `dist/`; stop it with Ctrl+C after downloading.
 
-The GitHub Actions workflow `.github/workflows/android.yml` runs the same checks and uploads a `Pod4Me-APK` artifact containing the installable debug APK. It does not publish a public release. GitHub artifacts are ZIP files: download and extract the APK before installing. Each fresh runner may use a different debug signing key; use local builds with the same key for persistent personal installs until dedicated release signing is configured.
+The GitHub Actions workflow `.github/workflows/android.yml` runs debug checks, release lint and compilation of device tests, and uploads a `Pod4Me-APK` artifact containing the installable debug APK. It does not publish a public release. GitHub artifacts are ZIP files: download and extract the APK before installing. Each fresh runner may use a different debug signing key; use local builds with the same key for persistent personal installs for CI smoke testing; the local release script is the supported personal update path.
 
 To expose Android tools to other projects, add this once to `~/.bashrc`:
 
@@ -38,22 +44,34 @@ export PATH="$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-t
 
 ## Use
 
-- **Feeds:** subscribe using an RSS/Atom URL; export UTF-8 text with one `url [podcast title]` per line. Import accepts both this format and plain URLs, ignoring everything after the URL on each line. Edit feed names, expiry periods, and default lists. Refresh is always manual.
-- **Latest:** browse compact episode rows by publication date or browse one feed. Use the download-arrow button to download and the question-mark button for details. Downloads are manual and allow mobile data (roaming is disabled). Android handles downloads and their notifications even when the UI is closed.
-- **Library:** browse downloaded episodes by list or feed; sort by publication date, download date, stars, feed name, or played percentage. Starred also includes rated episodes whose audio has expired, so they can be downloaded again.
+- **Feeds:** subscribe using an RSS/Atom URL; export UTF-8 text with one `url [podcast title]` per line. Import accepts both this format and plain URLs, ignoring everything after the URL on each line. The artwork/title row includes Browse, Settings and Refresh; episode counts and expiry align left underneath, beside smaller Suggest and Unsubscribe icons. Long-press an icon for its label. Refresh is always manual.
+- **Latest:** browse compact episode rows by publication date or browse one feed. Artwork sits beside the feed name and episode title; date, played percentage and expiry align left underneath. Use the download-arrow button to download and the question-mark button for details. Downloads are manual and allow mobile data (roaming is disabled). Android handles downloads and their notifications even when the UI is closed.
+- **Library:** browse downloaded episodes by list or feed; sort by publication date, download date, stars, feed name, or played percentage. Compact cards put Play, Add to queue and Details icons beside date/progress/expiry; progress appears as `41%` and expiry omits the year. Starred also includes rated episodes whose audio has expired, so they can be downloaded again.
 - **Details:** manage list memberships, rate episodes, read/select/copy show notes, copy the direct audio URL, suggest an episode, visit bookmarks, or delete audio.
-- **Queue:** reorder and remove explicitly queued episodes. When empty, playback follows the source list order captured when Play was pressed. Previous/Next and headphone controls use the actual player timeline.
+- **Queue:** use the up/down arrows to reorder and the bin to remove explicitly queued episodes; controls appear beside each title. Removing a queue entry keeps its audio. When empty, playback follows the source list order captured when Play was pressed. Previous/Next and headphone controls use the actual player timeline. Starting in the middle includes up to five preceding downloaded episodes. Restored queue entries with missing audio offer a download button and are skipped until downloaded.
 - **Player:** background playback, position scrubbing, a single row of playback controls, ±10 seconds, previous/next, global speed from 1.0× to 3.0×, and optionally named bookmarks. Playback positions persist periodically and on pause/seek/track changes.
 
-Feed artwork appears next to feeds and episodes in Feeds, Library, Queue, Latest, and the player. RSS images, iTunes artwork, and Atom logos/icons are supported. Press **Refresh** after upgrading to retrieve artwork for existing feeds. Images are cached; feeds with missing or unavailable artwork display a podcast symbol. The version 1-to-2 database migration adds artwork metadata without removing library data.
+Feed artwork appears next to feeds and episodes in Feeds, Library, Queue, Latest, and the player. RSS images, iTunes artwork, and Atom logos/icons are supported. Press **Refresh** after upgrading to retrieve artwork for existing feeds. Images are cached; feeds with missing or unavailable artwork display a podcast symbol. Database migrations preserve existing library data.
+
+To unsubscribe, tap the **bin in the feed's row** and confirm. This removes the subscription from Feeds, Latest, refresh and export. Existing downloads, pending manual downloads, queued episodes, ratings, bookmarks, feed settings and list memberships remain. Re-adding or importing the URL restores the subscription using its existing data. The version 2-to-3 database migration preserves current subscriptions and episode data.
+
+RSS/Atom responses are parsed incrementally, with a 64 MB limit on the uncompressed response and a three-minute request timeout. The parser retains episode metadata without buffering the whole response or constructing a DOM tree. Feeds larger than the former 8 MB limit are supported; feeds above 64 MB still report a size-limit error. XML DTDs (including harmless DOCTYPE declarations) and external entities are rejected. RSS 1.0/RDF and video enclosures are unsupported. Unsupported or invalid enclosures produce a skipped-episode count on the feed. RFC publication dates with US zone abbreviations are supported; dates without a timezone and date-only values use UTC. Declared durations longer than seven days are treated as unknown until measured by the player.
+
+Episode metadata is retained even when an item disappears from a rolling feed. History is not automatically pruned. Show notes load only when Details is opened; periodic playback saves update one episode without reloading notes. Unchanged episode metadata is not rewritten on refresh.
 
 Suggestions use Android's share menu. In WhatsApp, email, or a browser, share the message or URL into **Pod4Me**. Confirm a feed subscription or episode download in the app. Suggestions originating in Pod4Me contain the original URL plus a `pod4me://` link carrying the content type and source feed. The receiving app does not automatically subscribe or download. Raw episode *webpage* links are not resolved into media URLs; share the direct audio URL instead.
+
+## Portable library backup
+
+In **Feeds**, use **Back up library** to save a versioned JSON file through Android's document picker. This is separate from **Export**, which still exports only `url [title]` feed lines. Library backups include subscriptions, custom names and expiry settings, episode metadata and notes, lists/memberships, ratings, progress, bookmarks, queue, global speed and saved playback context. Audio files, local paths and Android download IDs are excluded. Automatic cloud and device-transfer backup remain disabled.
+
+Stop playback, choose **Restore library**, select the JSON file and confirm. Restore merges by feed URL, episode GUID and list name. Backup feed settings, ratings and progress replace matching values; memberships are combined, bookmarks are deduplicated, and restored queue entries append without duplicates. Existing audio and downloads remain. On another phone, missing audio must be downloaded manually. Queue entries remain available for downloading even if their feeds are unsubscribed. Invalid backups roll back the entire database change. Maximum backup input is 256 MB, with bounded record and field sizes.
 
 ## Storage rules
 
 New downloads expire after 30 days unless their feed specifies a different period or infinity. Expiry is checked when the activity enters the foreground, not by a background timer. At 95% playback, an episode becomes Heard and its expiry becomes the earlier of its existing deadline and seven days from that moment. Seeking past the threshold counts as reaching it. Removing an episode from Unheard also marks it heard; marking it Unheard resets its saved position.
 
-An episode in **4ever** cannot be deleted manually or by expiry until removed from that list. Active/paused current playback is protected too; stop it before deleting. Deleting audio retains ratings, bookmarks, list memberships, and playback history. Re-downloading an already-heard episode preserves its heard status and gets at most seven days unless protected by 4ever.
+An episode in **4ever** cannot be deleted manually or by expiry until removed from that list. Playing, buffering and paused current playback are protected too; stop it before deleting. Opening a cold session does not load the previous episode or protect it from expiry; headset resumption loads it when requested. Deleting audio retains ratings, bookmarks, list memberships, and playback history. Re-downloading an already-heard episode preserves its heard status and gets at most seven days unless protected by 4ever.
 
 Unheard and Heard are derived views and are mutually exclusive. Each feed has an automatic view. Custom lists support create/rename/delete and many-to-many episode membership. Deleting a custom list does not delete audio. Default feed-list changes and expiry settings apply to future downloads.
 
@@ -69,7 +87,7 @@ python3 tools/check_schema.py
 With the Android SDK and dependencies:
 
 ```bash
-./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+./tools/build-apk.sh
 ```
 
 See [device acceptance checks](docs/device-checks.md) before treating the app as ready for daily use.
