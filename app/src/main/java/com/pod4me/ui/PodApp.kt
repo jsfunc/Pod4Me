@@ -94,7 +94,8 @@ fun PodApp(model: AppModel) {
                     NavigationBar {
                         listOf("Library" to R.drawable.ic_browse, "Latest" to R.drawable.ic_download, "Feeds" to R.drawable.ic_podcast, "Queue" to R.drawable.ic_queue_add, "Player" to R.drawable.ic_play).forEach { (name, icon) ->
                             NavigationBarItem(selected = page == name, onClick = { page = name; if (name == "Latest") browseFeed = null },
-                                icon = { Icon(painterResource(icon), contentDescription = name) }, label = { Text(name) })
+                                modifier = Modifier.height(64.dp), alwaysShowLabel = false,
+                                icon = { Icon(painterResource(icon), contentDescription = name, modifier = Modifier.size(24.dp)) })
                         }
                     }
                 }
@@ -211,10 +212,8 @@ private fun FeedScreen(library: Library, busy: Boolean, onAdd: () -> Unit, onImp
     else LazyColumn(contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         items(visibleFeeds, key = Feed::id) { feed ->
             OutlinedCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
+                ArtworkRow(feed.artworkUrl, Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        FeedArtwork(feed.artworkUrl, 32.dp)
-                        Spacer(Modifier.width(8.dp))
                         Text(feed.name, modifier = Modifier.weight(1f).clickable { onBrowse(feed) },
                             style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
                             maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -304,10 +303,8 @@ private fun EpisodeCard(ep: Episode, feed: String, current: Boolean, onDetails: 
 private fun CompactEpisodeCard(ep: Episode, feed: String, current: Boolean, artworkUrl: String?,
     onDetails: () -> Unit, onPlay: () -> Unit, onDownload: () -> Unit, onCancel: () -> Unit, onQueue: () -> Unit) {
     OutlinedCard(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+        ArtworkRow(artworkUrl, Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                FeedArtwork(artworkUrl, 36.dp)
-                Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f).clickable(onClick = onDetails).padding(vertical = 4.dp)) {
                     Text(feed, style = MaterialTheme.typography.labelSmall, maxLines = 1,
                         overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.primary)
@@ -347,22 +344,23 @@ private fun QueueScreen(library: Library, model: AppModel, onDetails: (String) -
     else LazyColumn(contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         items(library.queue, key = { it }) { id -> library.episode(id)?.let { ep ->
             OutlinedCard(Modifier.fillMaxWidth()) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    FeedArtwork(library.feedArtwork(ep.feedId), 32.dp)
-                    Spacer(Modifier.width(8.dp))
-                    Column(Modifier.weight(1f).clickable { onDetails(id) }) {
-                        Text(ep.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
+                ArtworkRow(library.feedArtwork(ep.feedId), Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(ep.title, modifier = Modifier.weight(1f).clickable { onDetails(id) },
+                            style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
                             maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        Text(library.feedName(ep.feedId), style = MaterialTheme.typography.labelSmall,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        ActionIcon(R.drawable.ic_up, "Move up in queue", enabled = library.queue.first() != id,
+                            onClick = { model.action { model.store.moveQueue(id, -1) } })
+                        ActionIcon(R.drawable.ic_down, "Move down in queue", enabled = library.queue.last() != id,
+                            onClick = { model.action { model.store.moveQueue(id, 1) } })
+                        ActionIcon(R.drawable.ic_delete, "Remove from queue", onClick = { model.action { model.store.removeFromQueue(id) } })
                     }
-                    if (!ep.isDownloaded) ActionIcon(R.drawable.ic_download, "Download queued episode", enabled = ep.downloadId == null,
-                        onClick = { model.action { model.store.download(id) } })
-                    ActionIcon(R.drawable.ic_up, "Move up in queue", enabled = library.queue.first() != id,
-                        onClick = { model.action { model.store.moveQueue(id, -1) } })
-                    ActionIcon(R.drawable.ic_down, "Move down in queue", enabled = library.queue.last() != id,
-                        onClick = { model.action { model.store.moveQueue(id, 1) } })
-                    ActionIcon(R.drawable.ic_delete, "Remove from queue", onClick = { model.action { model.store.removeFromQueue(id) } })
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(library.feedName(ep.feedId), modifier = Modifier.weight(1f).clickable { onDetails(id) },
+                            style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (!ep.isDownloaded) ActionIcon(R.drawable.ic_download, "Download queued episode", enabled = ep.downloadId == null,
+                            onClick = { model.action { model.store.download(id) } })
+                    }
                 }
             }
         } }

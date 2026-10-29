@@ -2,13 +2,15 @@
 
 A local Android podcast manager for a Galaxy S24 and newer phones. Native Kotlin / Jetpack Compose UI, SQLite storage, Android DownloadManager downloads, and Media3 background playback. No accounts, analytics, or application server.
 
+For future development, start with [AGENTS.md](AGENTS.md) and the [development handover](docs/handover.md), which record the accepted requirements, current state, build/signing workflow and pending checks.
+
 ## Build status
 
 The v1 source is **1.0.0 (version code 8)**. It addresses the audit's playback, library performance, parser, download cleanup, backup and release-packaging findings while retaining the compact layouts. Validation results and remaining device checks are recorded in [v1 verification](docs/v1-verification.md).
 
 **Follow-up source correction:** RSS documents using a default namespace are now supported, with namespace isolation retained. The shared-feed restore already keeps ID `shared`; its regression test now also starts a subsequent download. The corrected source passes 96 core checks and 35 unit tests. The corrected APK was rebuilt successfully and verified; `dist/Pod4Me.apk` includes this correction.
 
-The signed v1 APK was built successfully on 2026-10-29 via the normal-terminal build script: 35 Android unit tests passed, release lint reported zero errors (20 warnings), and Android device tests compiled. Independent APK checks confirmed version 1.0.0, a non-debuggable application and the same signing certificate as the previous local APK. The S24 device checks remain pending.
+The signed v1 APK was built successfully on 2026-10-29 via the normal-terminal build script: 35 Android unit tests passed, release lint reported zero errors (22 warnings), and Android device tests compiled. Independent APK checks confirmed version 1.0.0, a non-debuggable application and the same signing certificate as the previous local APK. The S24 device checks remain pending.
 
 ## Build an installable APK
 
@@ -32,7 +34,7 @@ To use an existing personal keystore instead, set `POD4ME_KEYSTORE`, `POD4ME_STO
 
 To download directly on a phone connected to the same Wi-Fi, run `python3 tools/serve-apk.py` in your normal terminal and open the printed URL on the phone. The server exposes only `dist/`; stop it with Ctrl+C after downloading.
 
-The GitHub Actions workflow `.github/workflows/android.yml` runs debug checks, release lint and compilation of device tests, and uploads a `Pod4Me-APK` artifact containing the installable debug APK. It does not publish a public release. GitHub artifacts are ZIP files: download and extract the APK before installing. Each fresh runner may use a different debug signing key; use local builds with the same key for persistent personal installs for CI smoke testing; the local release script is the supported personal update path.
+The GitHub Actions workflow `.github/workflows/android.yml` runs debug checks, release lint and compilation of device tests, and uploads a `Pod4Me-APK` artifact containing the installable debug APK. It does not publish a public release. GitHub artifacts are ZIP files: download and extract the APK before installing. Each fresh runner may use a different debug signing key. Use CI artifacts for build checking; the local release script with the existing personal key is the supported update path.
 
 To expose Android tools to other projects, add this once to `~/.bashrc`:
 
@@ -44,12 +46,14 @@ export PATH="$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-t
 
 ## Use
 
-- **Feeds:** subscribe using an RSS/Atom URL; export UTF-8 text with one `url [podcast title]` per line. Import accepts both this format and plain URLs, ignoring everything after the URL on each line. The artwork/title row includes Browse, Settings and Refresh; episode counts and expiry align left underneath, beside smaller Suggest and Unsubscribe icons. Long-press an icon for its label. Refresh is always manual.
-- **Latest:** browse compact episode rows by publication date or browse one feed. Artwork sits beside the feed name and episode title; date, played percentage and expiry align left underneath. Use the download-arrow button to download and the question-mark button for details. Downloads are manual and allow mobile data (roaming is disabled). Android handles downloads and their notifications even when the UI is closed.
+- **Feeds:** subscribe using an RSS/Atom URL; export UTF-8 text with one `url [podcast title]` per line. Import accepts both this format and plain URLs, ignoring everything after the URL on each line. Larger artwork spans the item height on the left. The title, Browse/Settings/Refresh controls, episode counts, expiry and smaller Suggest/Unsubscribe controls sit to its right. Long-press an icon for its label. Refresh is always manual.
+- **Latest:** browse compact episode rows by publication date or browse one feed. Larger artwork spans the item height; the feed name, title, date, played percentage, expiry and controls sit to its right. Use the download-arrow button to download and the question-mark button for details. Downloads are manual and allow mobile data (roaming is disabled). Android handles downloads and their notifications even when the UI is closed.
 - **Library:** browse downloaded episodes by list or feed; sort by publication date, download date, stars, feed name, or played percentage. Compact cards put Play, Add to queue and Details icons beside date/progress/expiry; progress appears as `41%` and expiry omits the year. Starred also includes rated episodes whose audio has expired, so they can be downloaded again.
 - **Details:** manage list memberships, rate episodes, read/select/copy show notes, copy the direct audio URL, suggest an episode, visit bookmarks, or delete audio.
-- **Queue:** use the up/down arrows to reorder and the bin to remove explicitly queued episodes; controls appear beside each title. Removing a queue entry keeps its audio. When empty, playback follows the source list order captured when Play was pressed. Previous/Next and headphone controls use the actual player timeline. Starting in the middle includes up to five preceding downloaded episodes. Restored queue entries with missing audio offer a download button and are skipped until downloaded.
+- **Queue:** use the up/down arrows to reorder and the bin to remove explicitly queued episodes; controls appear beside each title, with larger artwork spanning the full item height on the left. Removing a queue entry keeps its audio. When empty, playback follows the source list order captured when Play was pressed. Previous/Next and headphone controls use the actual player timeline. Starting in the middle includes up to five preceding downloaded episodes. Restored queue entries with missing audio offer a download button and are skipped until downloaded.
 - **Player:** background playback, position scrubbing, a single row of playback controls, ±10 seconds, previous/next, global speed from 1.0× to 3.0×, and optionally named bookmarks. Playback positions persist periodically and on pause/seek/track changes.
+
+Bottom navigation uses five equally sized icon-only buttons; their names remain available to accessibility services. The Library card layout is unchanged.
 
 Feed artwork appears next to feeds and episodes in Feeds, Library, Queue, Latest, and the player. RSS images, iTunes artwork, and Atom logos/icons are supported. Press **Refresh** after upgrading to retrieve artwork for existing feeds. Images are cached; feeds with missing or unavailable artwork display a podcast symbol. Database migrations preserve existing library data.
 

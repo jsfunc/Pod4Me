@@ -14,7 +14,7 @@ Source version: 1.0.0, code 8. Database version: 4. Audit baseline: `audit.txt`.
 | F11, F14 | Completed download ID retained until deletion; readable download/constraint/link errors | DownloadManager shadow tests cover success, repeat completion, cancellation, removal, failure and deletion. Actual Android manager behavior pending. |
 | F15–F16 | Skip unchanged metadata writes; preserve history and heard status; Starred stays selected when sort changes; integer GB retained | Trigger-based update regression; documented history and parser limitations. |
 | F17 | Explicit expiry validation, SQL statements per line, versioned User-Agent, modern Kotlin compiler options, cached date formatters, keyed dialog input, navigation icons, single activity instance, unused queue function removed | Full Kotlin/Java source compilation; core/schema checks. |
-| F18 | Versioned, non-debuggable release configuration and guarded signing script; preserves prior certificate and checks old APK certificate before delivery | Normal-terminal Gradle build, release lint and signed APK checks passed. Git commit/push remain pending because this workspace mounts `.git` read-only. |
+| F18 | Versioned, non-debuggable release configuration and guarded signing script; preserves prior certificate and checks old APK certificate before delivery | Normal-terminal Gradle build, release lint and signed APK checks passed. Base v1 is committed as `1c2a6d0`; the latest layout/documentation changes remain uncommitted at handover. This workspace mounts `.git` read-only. |
 
 ## Executed in this workspace
 
@@ -27,7 +27,7 @@ Source version: 1.0.0, code 8. Database version: 4. Audit baseline: `audit.txt`.
 
 ## Release build and independent APK verification
 
-The user ran `./tools/build-apk.sh` from the normal terminal on 2026-10-29. The observed log `/tmp/pod4me-v1-build.log` ended with `BUILD SUCCESSFUL in 39s (latest rebuild)` and the script's verified-APK message. All 35 Gradle Android unit tests passed with zero failures/errors; release lint had zero errors and 20 warnings (dependency update notices, KTX suggestions, the media service's required export, and a redundant resource qualifier). Android device-test APK compilation passed; tests were not run on hardware.
+The user ran `./tools/build-apk.sh` from the normal terminal on 2026-10-29. The observed log `/tmp/pod4me-v1-build.log` ended with `BUILD SUCCESSFUL in 40s` and the script's verified-APK message. All 35 Gradle Android unit tests passed with zero failures/errors; release lint had zero errors and 22 warnings (dependency update notices, KTX suggestions, the media service's required export, a redundant resource qualifier, and two artwork-helper Modifier parameter conventions). Android device-test APK compilation passed; tests were not run on hardware.
 
 Independent checks of the delivered file:
 
@@ -36,7 +36,7 @@ Independent checks of the delivered file:
 - Non-debuggable; APK signature verification passed (v2 scheme).
 - Signing-certificate SHA-256: `6585371f3a4d176f2c50c706f3c0efa099aeca152ffcc3431876c698babe2ada`, matching the previous local APK captured before replacement.
 - Size: 28,829,095 bytes.
-- APK SHA-256: `930c41c5a2f467980c0e86f63be44ff9f9d238b23f58ffbe96fe2f5b5067cc87`.
+- APK SHA-256: `11b7c441144cb1c53a9998a5ef0f88ff549f352f17f52dc84409ccbf8a48951a`.
 - The certificate is retained from the earlier debug-signed personal builds to allow an update; the release APK itself is not debuggable.
 
 ## Remaining device acceptance
@@ -52,3 +52,9 @@ The default-namespace RSS rejection was reproduced with a failing regression bef
 The shared-feed restore fix was already present in the verified v1 build: a missing feed with an empty URL is inserted with ID `shared`. Its regression was strengthened to assert that ID explicitly after an empty-library restore and to start a subsequent shared download.
 
 After this correction, 96 core checks and all 35 JUnit/Robolectric tests passed via the cached standalone toolchain. Android device-test sources compiled, including the new namespace regression; execution on a device remains pending. `git diff --check` passed. The normal-terminal rebuild subsequently passed all 35 Gradle unit tests, release lint (zero errors), release assembly and device-test compilation. Independent version/signature/non-debuggable/checksum checks passed. The APK/hash recorded above now identify the corrected release.
+
+## Follow-up: artwork and bottom navigation layout
+
+Feeds, Latest and Queue now use 72 dp-wide artwork spanning the full item content height, with text, metadata and actions to its right. The shared layout measures the content first and fits the artwork in the same pass, avoiding intrinsic measurement of tooltips. Library cards retain their previous code and 40 dp artwork. The bottom navigation omits visible labels and uses equal 64 dp button heights and 24 dp icons, while retaining accessible names.
+
+The normal-terminal rebuild passed release assembly, all 35 unit tests, release lint (zero errors) and compilation of device tests. Independent APK version, certificate, non-debuggable and checksum checks passed; the size/hash above identify this latest layout build. S24 visual acceptance remains pending (device check 27).
