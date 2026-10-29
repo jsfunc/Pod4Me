@@ -1,0 +1,37 @@
+Build a podcast management application for android that should run on my galaxy S24
+
+- subscribe to rss feeds by providing the rss url ; possibility to import and export a list of rss feeds (text format, one per line)
+
+- rss feed names are customizable 
+
+- manage downloads in rss feeds: either by navigating the rss of each feed, or with a list of the latest possible downloads in all feeds (ordered by date of publication)
+
+- by rss feed, choose default behavious: an expiry date (by default 1 month, can be set to infinity) 
+
+- organize the view of the downloaded tracks by lists that can be managed; each track can be in several lists simultaneoulsy; initially only list "unheard" and the list "4ever" exists but the user can add its own lists, and each feed can be given one or several default lists to which each download is added by default.
+
+- the tracks of the list "4ever" cannot be deleted (unless they are removed from this list)
+
+- each track can be given a number of stars from 1 to 5
+
+- each downloaded track is by default in the list "unheard" and in the list of the rss feed it comes from, but can be added to others (and removed from them) ; once heard, it is removed from "unheard" and added to the list "heard" with an expiry date by default set to the minimum between its previous expiry date and 7 days.
+
+- for each list, display possible by date of publication, by date of download, by number of stars, by rss feed name, by percentage of reading (0% first)
+
+- possibility to show all tracks by decreasing order of stars (only those with at least 1 star)
+
+- possibility to delete tracks
+
+- play a trackwith possibility to put bookmarks at special moments and quickly reach them afterwards; of course, should play the track in background when other applications run in the frontground
+
+- possibility to play the sounds at speed 1.0 to 3.0
+
+- possibility to read and copy the episode info
+
+- possibility to share content: button "share" that copies the source (typically rss ref of the sound) to the clipboard for sending in whatsapp or mail
+
+- show somewhere on the screen the number of GB occupied by the downloaded tracks, and the number of GB free in the phone (rounded to the closest integer)
+
+- it should appear as a "player" and hence be manageable from the quick settings (progress bar, -10s, +10s, previous and next track)
+
+- it should be very clean, robust code that can be used as a solid basis for adding further features if necessary, with a special attention to avoid any kind of bug. Always priorize simplicity and clarity: minimalistic, entirely functionality-oriented. Do not care too much about backward compatibility: it should work on my S24 and on the new phones to come
