@@ -4,7 +4,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.graphics.Color
 
-// Orange palette based on the #F54927 launcher background. Deeper light-mode
+// Orange palette based on the original #F54927 brand color. Deeper light-mode
 // accents and lighter dark-mode accents keep small labels and controls readable.
 internal val PodLightColors = lightColorScheme(
     primary = Color(0xFFB83216),

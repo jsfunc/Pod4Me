@@ -16,10 +16,13 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import com.pod4me.data.LibraryBackup
+import com.pod4me.data.PodcastDiscoveryClient
 import java.io.File
 import kotlin.math.roundToLong
 
 data class StorageUi(val usedGb: Long = 0, val freeGb: Long = 0)
+data class DiscoveryUi(val generation: Int = 0, val loading: Boolean = false,
+    val items: List<PodcastRecommendation> = emptyList(), val message: String? = null)
 class AppModel(application: Application) : AndroidViewModel(application) {
     val app = application as PodApplication
     val store = app.store
@@ -34,6 +37,10 @@ class AppModel(application: Application) : AndroidViewModel(application) {
     val storage = mutableStorage.asStateFlow()
     private val mutableSuggestion = MutableStateFlow<Suggestion?>(null)
     val suggestion = mutableSuggestion.asStateFlow()
+    private val discoveryClient = PodcastDiscoveryClient()
+    private val recentlySuggested = linkedSetOf<String>()
+    private val mutableDiscovery = MutableStateFlow(DiscoveryUi())
+    val discovery = mutableDiscovery.asStateFlow()
 
     init {
         viewModelScope.launch {
@@ -57,16 +64,31 @@ class AppModel(application: Application) : AndroidViewModel(application) {
     }
     fun refresh(feed: Feed? = null) = network {
         val targets = (feed?.let(::listOf) ?: library.value.subscriptions).filter { it.subscribed && it.url.isNotBlank() }
-        var successes = 0
         val failures = mutableListOf<String>()
         for (target in targets) {
-            try { store.saveFeed(target.url, app.feeds.fetch(target.url), target.id); successes++ }
+            try { store.saveFeed(target.url, app.feeds.fetch(target.url), target.id) }
             catch (e: CancellationException) { throw e }
             catch (e: Exception) { store.feedError(target.id, e.message ?: "Refresh failed"); failures += target.name }
         }
-        mutableNotice.value = "$successes feed(s) refreshed" + if (failures.isEmpty()) "" else "; failed: ${failures.joinToString()}"
+        if (failures.isNotEmpty()) mutableNotice.value = "Refresh failed: ${failures.joinToString()}"
     }
     fun subscribe(url: String) = network { subscribeNow(url); mutableNotice.value = "Feed added" }
+    fun discover() = network {
+        val generation = mutableDiscovery.value.generation + 1
+        mutableDiscovery.value = DiscoveryUi(generation, loading = true)
+        try {
+            val result = discoveryClient.discover(library.value, recentlySuggested.toSet())
+            result.items.forEach { recentlySuggested += PodcastDiscovery.feedKey(it.feedUrl) }
+            while (recentlySuggested.size > 100) recentlySuggested.remove(recentlySuggested.first())
+            mutableDiscovery.value = DiscoveryUi(generation, items = result.items,
+                message = if (result.partial) "Some directory requests failed; showing the suggestions available." else null)
+        } catch (e: CancellationException) {
+            mutableDiscovery.value = DiscoveryUi(generation, message = "Search interrupted. Tap New suggestions to try again.")
+            throw e
+        } catch (e: Exception) {
+            mutableDiscovery.value = DiscoveryUi(generation, message = e.message ?: "Could not load suggestions.")
+        }
+    }
     private suspend fun subscribeNow(url: String): String {
         val normalized = FeedParser.httpUrl(url.trim())
         return store.saveFeed(normalized, app.feeds.fetch(normalized))

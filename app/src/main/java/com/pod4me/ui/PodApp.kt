@@ -24,6 +24,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -51,9 +52,12 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 @Composable
 fun PodApp(model: AppModel) {
+    val positions = rememberSaveable(saver = ScrollPositions.Saver) { ScrollPositions() }
+    val screenState = rememberSaveableStateHolder()
     val library by model.library.collectAsStateWithLifecycle()
     val currentId by remember(model) { model.player.state.map { it.id }.distinctUntilChanged() }.collectAsStateWithLifecycle(initialValue = null)
     val storage by model.storage.collectAsStateWithLifecycle()
@@ -70,6 +74,7 @@ fun PodApp(model: AppModel) {
     var editingFeed by remember { mutableStateOf<Feed?>(null) }
     var unsubscribingFeed by remember { mutableStateOf<Feed?>(null) }
     var showLists by remember { mutableStateOf(false) }
+    var showDiscovery by rememberSaveable { mutableStateOf(false) }
     var restoreUri by remember { mutableStateOf<android.net.Uri?>(null) }
     val context = LocalContext.current
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { it?.let(model::importFeeds) }
@@ -99,7 +104,7 @@ fun PodApp(model: AppModel) {
                     if (page != "Player") MiniPlayer(library, model) { page = "Player" }
                     NavigationBar {
                         listOf("Library" to R.drawable.ic_browse, "Latest" to R.drawable.ic_download, "Feeds" to R.drawable.ic_feeds, "Queue" to R.drawable.ic_queue_add, "Player" to R.drawable.ic_play).forEach { (name, icon) ->
-                            NavigationBarItem(selected = page == name, onClick = { page = name; if (name == "Latest") browseFeed = null },
+                            NavigationBarItem(selected = page == name, onClick = { page = name },
                                 modifier = Modifier.height(64.dp), alwaysShowLabel = false,
                                 icon = { Icon(painterResource(icon), contentDescription = name, modifier = Modifier.size(24.dp)) })
                         }
@@ -111,14 +116,15 @@ fun PodApp(model: AppModel) {
                 if (!library.ready) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
                 } else when (page) {
-                    "Feeds" -> FeedScreen(library, busy, onAdd = { showAddFeed = true },
+                    "Feeds" -> FeedScreen(library, busy, positions, onAdd = { showAddFeed = true },
                         onImport = { importLauncher.launch(arrayOf("text/*", "application/octet-stream")) },
                         onExport = { exportLauncher.launch("pod4me-feeds.txt") },
+                        onDiscover = { showDiscovery = true; model.discover() },
                         onBackup = { backupLauncher.launch("pod4me-library-v1.json") },
                         onRestore = { restoreLauncher.launch(arrayOf("application/json", "text/*", "application/octet-stream")) },
                         onBrowse = { browseFeed = it.id; page = "Latest" }, onEdit = { editingFeed = it },
                         onRefresh = model::refresh, onSuggest = { share(context, Suggestions.feed(it)) }, onUnsubscribe = { unsubscribingFeed = it })
-                    "Library", "Latest" -> {
+                    "Library", "Latest" -> screenState.SaveableStateProvider("episodes:$page:${browseFeed.takeIf { page == "Latest" }}") {
                         val downloaded = page == "Library"
                         var searchOpen by rememberSaveable(page, browseFeed) { mutableStateOf(false) }
                         var searchQuery by rememberSaveable(page, browseFeed) { mutableStateOf("") }
@@ -185,7 +191,9 @@ fun PodApp(model: AppModel) {
                             search.error != null -> search.error
                             else -> "No matching episodes. Try fewer words or another spelling."
                         } else if (library.feeds.isEmpty()) "Add your first RSS feed in Feeds, or share a podcast link into Pod4Me." else if (downloaded) "No downloads in this view. Open Latest to download episodes." else "No episodes here. Press Refresh to check the feed.")
-                        else LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(if (downloaded) 8.dp else 4.dp)) {
+                        else LazyColumn(Modifier.fillMaxSize(), state = positions.list(
+                            if (downloaded) "library:$filter:${sort.name}"
+                            else if (searching) "search:$browseFeed:$searchQuery" else "latest:${browseFeed ?: "all"}", visibleIds), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(if (downloaded) 8.dp else 4.dp)) {
                             items(episodes, key = Episode::id) { ep -> EpisodeCard(ep, library.feedName(ep.feedId), currentId == ep.id,
                                 onDetails = { selectedId = ep.id },
                                 onPlay = { model.action { model.player.play(ep.id, playOrder) } },
@@ -196,8 +204,8 @@ fun PodApp(model: AppModel) {
                                 artworkUrl = library.feedArtwork(ep.feedId)) }
                         }
                     }
-                    "Queue" -> QueueScreen(library, model, onDetails = { selectedId = it })
-                    "Player" -> PlayerScreen(library, model, onDetails = { selectedId = it })
+                    "Queue" -> QueueScreen(library, model, positions, onDetails = { selectedId = it })
+                    "Player" -> PlayerScreen(library, model, positions, onDetails = { selectedId = it })
                 }
             }
         }
@@ -208,7 +216,7 @@ fun PodApp(model: AppModel) {
             dismissButton = { TextButton(onClick = { restoreUri = null }) { Text("Cancel") } }) }
         if (showAddFeed) TextInputDialog("Subscribe to a podcast", "RSS feed URL", "", "Subscribe", busy,
             onDismiss = { showAddFeed = false }, onSave = { model.subscribe(it); showAddFeed = false })
-        editingFeed?.let { feed -> FeedEditDialog(feed, library.lists, onDismiss = { editingFeed = null }) { name, days, defaults ->
+        editingFeed?.let { feed -> FeedEditDialog(feed, library.lists, positions, onDismiss = { editingFeed = null }) { name, days, defaults ->
             model.action { model.store.editFeed(feed.id, name, days, defaults); editingFeed = null }
         } }
         unsubscribingFeed?.let { feed -> AlertDialog(
@@ -222,8 +230,9 @@ fun PodApp(model: AppModel) {
             } }) { Text("Unsubscribe") } },
             dismissButton = { TextButton(onClick = { unsubscribingFeed = null }) { Text("Cancel") } },
         ) }
-        if (showLists) ListsDialog(library.lists, model) { showLists = false }
-        library.episode(selectedId)?.let { ep -> EpisodeDialog(ep, library, model, onDismiss = { selectedId = null }) }
+        if (showLists) ListsDialog(library.lists, model, positions) { showLists = false }
+        if (showDiscovery) DiscoveryDialog(library, model, positions, busy) { showDiscovery = false }
+        library.episode(selectedId)?.let { ep -> EpisodeDialog(ep, library, model, positions, onDismiss = { selectedId = null }) }
         suggestion?.let { incoming -> SuggestionDialog(incoming, busy, onDismiss = model::dismissSuggestion) { kind, subscribe -> model.acceptSuggestion(incoming, kind, subscribe) } }
         error?.let { message -> AlertDialog(onDismissRequest = model.app::clearError, title = { Text("Could not complete action") }, text = { Text(message) },
             confirmButton = { TextButton(onClick = model.app::clearError) { Text("OK") } }) }
@@ -233,18 +242,19 @@ fun PodApp(model: AppModel) {
 }
 
 @Composable
-private fun FeedScreen(library: Library, busy: Boolean, onAdd: () -> Unit, onImport: () -> Unit, onExport: () -> Unit,
+private fun FeedScreen(library: Library, busy: Boolean, positions: ScrollPositions, onAdd: () -> Unit, onImport: () -> Unit, onExport: () -> Unit, onDiscover: () -> Unit,
     onBackup: () -> Unit, onRestore: () -> Unit, onBrowse: (Feed) -> Unit, onEdit: (Feed) -> Unit, onRefresh: (Feed) -> Unit, onSuggest: (Feed) -> Unit, onUnsubscribe: (Feed) -> Unit) {
     FlowRow(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Button(onClick = onAdd, enabled = !busy) { Text("Add RSS feed") }
         TextButton(onClick = onImport, enabled = !busy) { Text("Import") }
         TextButton(onClick = onExport) { Text("Export") }
+        TextButton(onClick = onDiscover, enabled = !busy) { Text("New?") }
         TextButton(onClick = onBackup, enabled = !busy) { Text("Back up library") }
         TextButton(onClick = onRestore, enabled = !busy) { Text("Restore library") }
     }
     val visibleFeeds = library.feeds.filter { it.subscribed }
     if (visibleFeeds.isEmpty()) EmptyState("Subscribe with an RSS URL or import a text file containing one feed URL per line, optionally followed by [podcast title].")
-    else LazyColumn(contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    else LazyColumn(state = positions.list("feeds", visibleFeeds.map(Feed::id)), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         items(visibleFeeds, key = Feed::id) { feed ->
             OutlinedCard(Modifier.fillMaxWidth()) {
                 ArtworkRow(feed.artworkUrl, Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
@@ -273,6 +283,48 @@ private fun FeedScreen(library: Library, busy: Boolean, onAdd: () -> Unit, onImp
             }
         }
     }
+}
+
+@Composable
+private fun DiscoveryDialog(library: Library, model: AppModel, positions: ScrollPositions, busy: Boolean, onDismiss: () -> Unit) {
+    val discovery by model.discovery.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val subscribed = remember(library.feeds) {
+        library.subscriptions.mapNotNull { runCatching { PodcastDiscovery.feedKey(it.url) }.getOrNull() }.toSet()
+    }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("New podcasts") }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Related searches and popular shows from Apple Podcasts.", style = MaterialTheme.typography.bodySmall)
+            if (discovery.loading) {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+                Text("Finding suggestions…")
+            }
+            discovery.message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            if (discovery.items.isNotEmpty()) LazyColumn(Modifier.heightIn(max = 420.dp),
+                state = positions.list("discovery:${discovery.generation}", discovery.items.map { it.feedUrl }),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(discovery.items, key = { it.feedUrl }) { item ->
+                    OutlinedCard(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(item.title, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            if (item.publisher.isNotBlank()) Text(item.publisher, style = MaterialTheme.typography.bodySmall, maxLines = 2)
+                            Text(item.reason, style = MaterialTheme.typography.labelSmall, maxLines = 2)
+                            FlowRow {
+                                val added = PodcastDiscovery.feedKey(item.feedUrl) in subscribed
+                                TextButton(enabled = !added && !busy, onClick = { model.subscribe(item.feedUrl) }) {
+                                    Text(if (added) "Subscribed" else "Subscribe")
+                                }
+                                TextButton(onClick = { model.action {
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(item.appleUrl)))
+                                } }) { Text("Apple Podcasts") }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+        dismissButton = { TextButton(enabled = !busy, onClick = model::discover) { Text("New suggestions") } })
 }
 
 @Composable
@@ -316,7 +368,7 @@ private fun EpisodeCard(ep: Episode, feed: String, current: Boolean, onDetails: 
                 Column(Modifier.weight(1f)) {
                     Text("${date(ep.published)} · ${if (ep.heard) "Heard" else "Unheard"}" +
                         (if (ep.stars > 0) " · ${"★".repeat(ep.stars)}" else ""), style = MaterialTheme.typography.bodySmall)
-                    if (ep.isDownloaded) Text("${(ep.progress * 100).toInt()}% · ${if (ep.protected) "4ever" else ep.expiry?.let { "Expires ${date(it, includeYear = false)}" } ?: "No expiry"}",
+                    if (ep.isDownloaded) Text("${(ep.progress * 100).toInt()}% · ${durationLabel(ep.duration)}" + if (ep.protected) " · 4ever" else "",
                         style = MaterialTheme.typography.bodySmall)
                     else if (ep.downloadId != null) Text("Downloading…", style = MaterialTheme.typography.bodySmall)
                 }
@@ -355,18 +407,29 @@ private fun CompactEpisodeCard(ep: Episode, feed: String, current: Boolean, artw
                     Text(ep.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
-                IconButton(onClick = onDetails) { Icon(painterResource(R.drawable.ic_help), contentDescription = "Episode details") }
-                when {
-                    ep.isDownloaded -> {
-                        IconButton(onClick = onQueue) { Icon(painterResource(R.drawable.ic_queue_add), contentDescription = "Add to queue") }
-                        IconButton(onClick = onPlay) { Icon(painterResource(R.drawable.ic_play), contentDescription = "Play episode") }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onDetails) { Icon(painterResource(R.drawable.ic_help), contentDescription = "Episode details") }
+                        when {
+                            ep.isDownloaded -> {
+                                IconButton(onClick = onQueue) { Icon(painterResource(R.drawable.ic_queue_add), contentDescription = "Add to queue") }
+                                IconButton(onClick = onPlay) { Icon(painterResource(R.drawable.ic_play), contentDescription = "Play episode") }
+                            }
+                            ep.downloadId != null -> IconButton(onClick = onCancel) {
+                                Icon(painterResource(R.drawable.ic_close), contentDescription = "Cancel download")
+                            }
+                            else -> IconButton(onClick = onDownload) {
+                                Icon(painterResource(R.drawable.ic_download), contentDescription = "Download episode")
+                            }
+                        }
                     }
-                    ep.downloadId != null -> IconButton(onClick = onCancel) {
-                        Icon(painterResource(R.drawable.ic_close), contentDescription = "Cancel download")
-                    }
-                    else -> IconButton(onClick = onDownload) {
-                        Icon(painterResource(R.drawable.ic_download), contentDescription = "Download episode")
-                    }
+                    val minutes = durationMinutes(ep.duration)
+                    Text(durationLabel(ep.duration),
+                        style = MaterialTheme.typography.labelSmall, maxLines = 1,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.semantics {
+                            contentDescription = minutes?.let { "Duration: $it minutes" } ?: "Duration unknown"
+                        })
                 }
             }
             Text("${date(ep.published)} · ${if (ep.heard) "Heard" else "Unheard"}" +
@@ -381,11 +444,14 @@ private fun CompactEpisodeCard(ep: Episode, feed: String, current: Boolean, artw
 }
 
 @Composable
-private fun QueueScreen(library: Library, model: AppModel, onDetails: (String) -> Unit) {
-    Text("Up next", Modifier.padding(horizontal = 12.dp, vertical = 8.dp), style = MaterialTheme.typography.titleLarge)
+private fun QueueScreen(library: Library, model: AppModel, positions: ScrollPositions, onDetails: (String) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("Up next", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+        TextButton(enabled = library.queue.isNotEmpty(), onClick = { model.action { model.player.playQueue() } }) { Text("Play queue") }
+    }
     Text("Queued episodes play first. When the queue empties, playback continues through the list you started from, in that order.", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall)
     if (library.queue.isEmpty()) EmptyState("The queue is empty. Use + Queue on a downloaded episode.")
-    else LazyColumn(contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    else LazyColumn(state = positions.list("queue", library.queue), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         items(library.queue, key = { it }) { id -> library.episode(id)?.let { ep ->
             OutlinedCard(Modifier.fillMaxWidth()) {
                 ArtworkRow(library.feedArtwork(ep.feedId), Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
@@ -402,7 +468,9 @@ private fun QueueScreen(library: Library, model: AppModel, onDetails: (String) -
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(library.feedName(ep.feedId), modifier = Modifier.weight(1f).clickable { onDetails(id) },
                             style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (!ep.isDownloaded) ActionIcon(R.drawable.ic_download, "Download queued episode", enabled = ep.downloadId == null,
+                        if (ep.isDownloaded) ActionIcon(R.drawable.ic_play, "Play queued episode",
+                            onClick = { model.action { model.player.play(ep.id, library.queue) } })
+                        else ActionIcon(R.drawable.ic_download, "Download queued episode", enabled = ep.downloadId == null,
                             onClick = { model.action { model.store.download(id) } })
                     }
                 }
@@ -412,15 +480,21 @@ private fun QueueScreen(library: Library, model: AppModel, onDetails: (String) -
 }
 
 @Composable
-private fun PlayerScreen(library: Library, model: AppModel, onDetails: (String) -> Unit) {
+private fun PlayerScreen(library: Library, model: AppModel, positions: ScrollPositions, onDetails: (String) -> Unit) {
     val playback by model.player.state.collectAsStateWithLifecycle()
     val ep = library.episode(playback.id)
     var addBookmark by remember { mutableStateOf<Long?>(null) }
     var editBookmark by remember { mutableStateOf<Bookmark?>(null) }
-    if (ep == null) { EmptyState("Choose a downloaded episode and tap Play."); return }
+    if (ep == null) {
+        Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(if (library.queue.isEmpty()) "Choose a downloaded episode and tap Play." else "Your queue is ready to start.")
+            if (library.queue.isNotEmpty()) Button(onClick = { model.action { model.player.playQueue() } }) { Text("Play queue") }
+        }
+        return
+    }
     var seeking by remember(ep.id) { mutableStateOf<Float?>(null) }
     var speed by remember(playback.speed) { mutableFloatStateOf(playback.speed) }
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(positions.scroll("player:${ep.id}")).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             FeedArtwork(library.feedArtwork(ep.feedId), 64.dp)
             Column(Modifier.weight(1f)) {
@@ -432,6 +506,7 @@ private fun PlayerScreen(library: Library, model: AppModel, onDetails: (String) 
             onValueChange = { seeking = it }, valueRange = 0f..playback.duration.toFloat().coerceAtLeast(1f), enabled = playback.duration > 0,
             onValueChangeFinished = { seeking?.let { value -> model.action { model.player.seek(value.toLong()) } }; seeking = null })
         Text("${time(seeking?.toLong() ?: playback.position)} / ${time(playback.duration)}")
+        if (playback.buffering) Text("Preparing audio…", style = MaterialTheme.typography.bodySmall)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = { model.action { model.player.previous() } }, enabled = playback.hasPrevious) {
                 Icon(painterResource(R.drawable.ic_previous), contentDescription = "Previous episode")
@@ -474,7 +549,7 @@ private fun PlayerScreen(library: Library, model: AppModel, onDetails: (String) 
 }
 
 @Composable
-private fun EpisodeDialog(ep: Episode, library: Library, model: AppModel, onDismiss: () -> Unit) {
+private fun EpisodeDialog(ep: Episode, library: Library, model: AppModel, positions: ScrollPositions, onDismiss: () -> Unit) {
     val playback by model.player.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var confirmDelete by remember { mutableStateOf(false) }
@@ -484,7 +559,8 @@ private fun EpisodeDialog(ep: Episode, library: Library, model: AppModel, onDism
     }
     AlertDialog(onDismissRequest = onDismiss, title = { Text(ep.title, maxLines = 3, overflow = TextOverflow.Ellipsis) },
         text = {
-            Column(Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.heightIn(max = 520.dp).verticalScroll(
+                if (info == null) rememberScrollState() else positions.scroll("info:${ep.id}")), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(library.feedName(ep.feedId))
                 Text("Published: ${date(ep.published)}", style = MaterialTheme.typography.bodySmall)
                 ep.downloaded?.let { Text("Downloaded: ${date(it)}", style = MaterialTheme.typography.bodySmall) }
@@ -559,7 +635,7 @@ private fun DeleteAudioDialog(enabled: Boolean, onDismiss: () -> Unit, onDelete:
 }
 
 @Composable
-private fun FeedEditDialog(feed: Feed, lists: List<TrackList>, onDismiss: () -> Unit, onSave: (String, Int?, Set<String>) -> Unit) {
+private fun FeedEditDialog(feed: Feed, lists: List<TrackList>, positions: ScrollPositions, onDismiss: () -> Unit, onSave: (String, Int?, Set<String>) -> Unit) {
     var name by remember(feed.id) { mutableStateOf(feed.name) }
     var forever by remember(feed.id) { mutableStateOf(feed.expiryDays == null) }
     var days by remember(feed.id) { mutableStateOf((feed.expiryDays ?: 30).toString()) }
@@ -567,7 +643,7 @@ private fun FeedEditDialog(feed: Feed, lists: List<TrackList>, onDismiss: () -> 
     val validDays = days.toIntOrNull()?.let { it in 1..36500 } == true
     val valid = name.isNotBlank() && (forever || validDays)
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Feed settings") }, text = {
-        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(Modifier.verticalScroll(positions.scroll("feed-settings:${feed.id}")), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Feed name") }, singleLine = true)
             Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(checked = forever, onCheckedChange = { forever = it }); Text("Never expire new downloads") }
             if (!forever) OutlinedTextField(value = days, onValueChange = { days = it }, label = { Text("Expiry in days (1–36500)") }, singleLine = true, isError = !validDays)
@@ -587,12 +663,12 @@ private fun FeedEditDialog(feed: Feed, lists: List<TrackList>, onDismiss: () -> 
 }
 
 @Composable
-private fun ListsDialog(lists: List<TrackList>, model: AppModel, onDismiss: () -> Unit) {
+private fun ListsDialog(lists: List<TrackList>, model: AppModel, positions: ScrollPositions, onDismiss: () -> Unit) {
     var adding by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<TrackList?>(null) }
     var deleting by remember { mutableStateOf<TrackList?>(null) }
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Manage lists") }, text = {
-        Column(Modifier.heightIn(max = 450.dp).verticalScroll(rememberScrollState())) {
+        Column(Modifier.heightIn(max = 450.dp).verticalScroll(positions.scroll("manage-lists"))) {
             Text("Deleting a list keeps its audio. Unheard, Heard and 4ever are permanent.", style = MaterialTheme.typography.bodySmall)
             lists.forEach { list ->
                 Text(list.name, Modifier.padding(top = 12.dp), fontWeight = FontWeight.Bold)
@@ -649,10 +725,11 @@ private fun time(ms: Long): String {
     return if (seconds >= 3600) String.format(Locale.US, "%d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)
     else String.format(Locale.US, "%d:%02d", seconds / 60, seconds % 60)
 }
+private fun durationMinutes(ms: Long): Long? = ms.takeIf { it > 0 }?.let { (it / 60_000.0).roundToLong().coerceAtLeast(1) }
+private fun durationLabel(ms: Long): String = durationMinutes(ms)?.let { "${it}min" } ?: "Length unknown"
 private val fullDate = DateTimeFormatter.ofPattern("d MMM yyyy")
-private val shortDate = DateTimeFormatter.ofPattern("d MMM")
-private fun date(ms: Long, includeYear: Boolean = true) = if (ms <= 0) "Date unknown" else
-    (if (includeYear) fullDate else shortDate).withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(ms))
+private fun date(ms: Long) = if (ms <= 0) "Date unknown" else
+    fullDate.withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(ms))
 private fun copy(context: Context, label: String, value: String) {
     context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText(label, value))
     Toast.makeText(context, "Copied to clipboard", Toast.LENGTH_SHORT).show()

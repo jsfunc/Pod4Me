@@ -5,6 +5,6 @@
         <item name="android:windowActionModeOverlay">true</item>
         <item name="android:colorAccent">@color/pod_accent</item>
     </style>
-    <color name="icon_background">#F54927</color>
+    <color name="icon_background">#C43C1E</color>
     <color name="pod_accent">#B83216</color>
 </resources>

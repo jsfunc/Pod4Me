@@ -21,6 +21,64 @@ import java.io.File
 @Config(sdk = [35], application = PodApplication::class)
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class PlaybackServiceTest {
+    @Test fun queueStartSkipsMissingAudioAndKeepsItAvailableForDownload() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val episodes = queuedEpisodes(app)
+        File(episodes[0].path!!).delete()
+        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        try {
+            assertEquals(0, player(service.get()).mediaItemCount)
+            service.get().startQueue(play = false)
+            assertEquals(episodes[1].id, player(service.get()).currentMediaItem!!.mediaId)
+            assertEquals(listOf(episodes[0].id, episodes[2].id), app.store.library.value.queue)
+            assertEquals(episodes[2].id, player(service.get()).getMediaItemAt(player(service.get()).currentMediaItemIndex + 1).mediaId)
+        } finally { service.destroy() }
+    }
+
+    @Test fun idlePlayStartsQueueEvenWhenSavedEpisodeNoLongerExists() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val episodes = queuedEpisodes(app)
+        app.getSharedPreferences("playback", 0).edit().putString("current", "deleted").commit()
+        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        try {
+            service.get().togglePlayback()
+            assertEquals(episodes.first().id, player(service.get()).currentMediaItem!!.mediaId)
+            assertTrue(player(service.get()).playWhenReady)
+            assertEquals(episodes.first().id, app.store.activeEpisode.get())
+        } finally { service.destroy() }
+    }
+
+    @Test fun unavailableQueueExplainsHowToRecoverWithoutRemovingEntries() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val episodes = queuedEpisodes(app)
+        episodes.forEach { File(it.path!!).delete() }
+        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        try {
+            try { service.get().startQueue(play = false); fail("Missing audio cannot start") }
+            catch (e: IllegalStateException) { assertTrue(e.message!!.contains("download an episode")) }
+            assertEquals(episodes.map { it.id }, app.store.library.value.queue)
+            assertEquals(0, player(service.get()).mediaItemCount)
+            assertNull(app.store.activeEpisode.get())
+        } finally { service.destroy() }
+    }
+
+    private suspend fun queuedEpisodes(app: PodApplication): List<com.pod4me.domain.Episode> {
+        app.store.initialize()
+        app.store.saveFeed("https://example.com/queue", FeedParser.Feed("Queue", (1..3).map {
+            FeedParser.Item("q$it", "Queued $it", "https://example.com/q$it.mp3", "", it.toLong(), 10000)
+        }))
+        val episodes = app.store.library.value.episodes.sortedBy { it.published }
+        LibraryDatabase(app).use { helper -> episodes.forEach { ep ->
+            val file = File(app.getExternalFilesDir(Environment.DIRECTORY_PODCASTS), "${ep.id}.audio")
+            file.parentFile!!.mkdirs(); file.writeBytes(byteArrayOf(1, 2, 3))
+            helper.writableDatabase.execSQL("UPDATE episodes SET path=? WHERE id=?", arrayOf(file.path, ep.id))
+        } }
+        app.store.initialize()
+        val downloaded = episodes.map { app.store.library.value.episode(it.id)!! }
+        downloaded.forEach { app.store.enqueue(it.id) }
+        return downloaded
+    }
+
     @Test fun coldSessionLeavesSavedEpisodeUnloadedAndDeletable() = runBlocking {
         val app = RuntimeEnvironment.getApplication() as PodApplication
         app.store.initialize()

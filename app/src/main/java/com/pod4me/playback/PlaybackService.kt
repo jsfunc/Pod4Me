@@ -14,6 +14,7 @@ import com.google.common.util.concurrent.SettableFuture
 import com.pod4me.MainActivity
 import com.pod4me.PodApplication
 import com.pod4me.domain.Episode
+import com.pod4me.domain.Library
 import com.pod4me.domain.Policy
 import com.pod4me.domain.Upcoming
 import kotlinx.coroutines.*
@@ -74,7 +75,7 @@ class PlaybackService : MediaSessionService() {
                     try { player.seekTo(Policy.resumePosition(ep.position, ep.duration)) }
                     finally { changing = false }
                 }
-                scope.launch { safely { store.removeFromQueue(id); rebuildUpcoming() } }
+                scope.launch { safely { operations.withLock { store.removeFromQueue(id); rebuildUpcoming() } } }
             }
             override fun onIsPlayingChanged(isPlaying: Boolean) { if (!changing) saveProgress() }
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -94,6 +95,7 @@ class PlaybackService : MediaSessionService() {
                         .add(SessionCommand(BACK10, Bundle.EMPTY)).add(SessionCommand(FORWARD10, Bundle.EMPTY))
                     if (controller.packageName == packageName) {
                         commands.add(SessionCommand(START, Bundle.EMPTY)).add(SessionCommand(STOP, Bundle.EMPTY)).add(SessionCommand(MARK_UNHEARD, Bundle.EMPTY))
+                            .add(SessionCommand(TOGGLE, Bundle.EMPTY)).add(SessionCommand(PLAY_QUEUE, Bundle.EMPTY))
                     }
                     // System controls may seek/play/pause, but arbitrary external media cannot be injected.
                     val playerCommands = base.availablePlayerCommands.buildUpon()
@@ -107,20 +109,20 @@ class PlaybackService : MediaSessionService() {
                         try {
                             operations.withLock {
                                 store.initialize()
-                                val id = requireNotNull(preferences.getString("current", null)) { "Choose an episode in Pod4Me first" }
+                                val (id, order) = resumeSelection()
                                 val ep = store.activate(id)
                                 player.setPlaybackSpeed(preferences.getFloat("speed", 1f).coerceIn(1f, 3f))
-                                contextOrder = decodeOrder(preferences.getString("order", "[]") ?: "[]")
+                                contextOrder = order
                                 contextCursor = contextOrder.indexOf(id).takeIf { it >= 0 } ?: preferences.getInt("cursor", -1)
                                 started = true
                                 val before = preceding(id)
-                                val available = store.library.value.episodes.filter(Episode::isDownloaded).map(Episode::id).toSet()
+                                val available = availableIds(store.library.value)
                                 val next = Upcoming.plan(store.library.value.queue, contextOrder, contextCursor, id, before.map(Episode::id).toSet(), available)
                                     .mapNotNull(store.library.value::episode)
                                 result.set(MediaSession.MediaItemsWithStartPosition((before + ep + next).map(::item), before.size,
                                     Policy.resumePosition(ep.position, ep.duration)))
                             }
-                        } catch (e: Exception) { result.setException(e) }
+                        } catch (e: Exception) { app.report(e); result.setException(e) }
                     }
                     return result
                 }
@@ -140,6 +142,8 @@ class PlaybackService : MediaSessionService() {
                                     val id = requireNotNull(args.getString("id")) { "Episode is missing" }
                                     markUnheard(id)
                                 }
+                                TOGGLE -> togglePlayback()
+                                PLAY_QUEUE -> startQueue()
                                 STOP -> {
                                     saveProgressNow()
                                     player.stop(); player.clearMediaItems()
@@ -166,7 +170,7 @@ class PlaybackService : MediaSessionService() {
             )).build()
         scope.launch {
             store.library.map { library -> library.queue to library.episodes.filter { it.isDownloaded }.map { it.id } }
-                .distinctUntilChanged().collect { if (started) rebuildUpcoming() }
+                .distinctUntilChanged().collect { operations.withLock { if (started) rebuildUpcoming() } }
         }
         scope.launch {
             while (isActive) { delay(5_000); if (player.isPlaying) operations.withLock { saveProgressNow() } }
@@ -181,6 +185,54 @@ class PlaybackService : MediaSessionService() {
             if (player.currentMediaItem?.mediaId == id) player.seekTo(0)
             store.membership(id, "unheard", true)
         } finally { changing = false }
+    }
+
+    /** Queue entries can survive without files after restore; choose a real file, never an empty timeline. */
+    internal suspend fun resumeSelection(queueOnly: Boolean = false): Pair<String, List<String>> {
+        if (!store.library.value.ready) store.initialize()
+        val library = store.library.value
+        val queued = withContext(Dispatchers.IO) {
+            library.queue.firstOrNull { id -> library.episode(id)?.path?.let { File(it).isFile && File(it).length() > 0 } == true }
+        }
+        if (queued != null) return queued to library.queue
+        if (!queueOnly) {
+            val saved = preferences.getString("current", null)
+            val available = withContext(Dispatchers.IO) {
+                library.episode(saved)?.path?.let { File(it).isFile && File(it).length() > 0 } == true
+            }
+            if (saved != null && available) return saved to decodeOrder(preferences.getString("order", "[]") ?: "[]")
+        }
+        error(if (library.queue.isNotEmpty()) "Queued audio is missing. Open Queue and download an episode to play it."
+            else "Choose a downloaded episode or add one to Queue first.")
+    }
+
+    internal suspend fun startQueue(play: Boolean = true) {
+        val (id, order) = resumeSelection(queueOnly = true)
+        startEpisode(id, order, -1, play)
+    }
+
+    internal suspend fun togglePlayback() {
+        if (player.playWhenReady && player.playbackState != Player.STATE_ENDED && player.playerError == null) {
+            player.pause()
+            return
+        }
+        if (player.currentMediaItem == null) {
+            val (id, order) = resumeSelection()
+            startEpisode(id, order, -1)
+            return
+        }
+        if (player.playbackState == Player.STATE_ENDED && store.library.value.queue.isNotEmpty()) {
+            val selection = runCatching { resumeSelection(queueOnly = true) }.getOrElse {
+                if (it is CancellationException) throw it
+                null
+            }
+            if (selection != null) { startEpisode(selection.first, selection.second, -1); return }
+        }
+        // Revalidate before retrying a stopped/error player, rather than silently retrying a vanished file.
+        store.activate(requireNotNull(player.currentMediaItem).mediaId)
+        if (player.playbackState == Player.STATE_ENDED) player.seekTo(0)
+        if (player.playbackState == Player.STATE_IDLE) player.prepare()
+        player.play()
     }
 
     internal suspend fun startEpisode(id: String, order: List<String>, position: Long, play: Boolean = true) {
@@ -203,14 +255,23 @@ class PlaybackService : MediaSessionService() {
         if (play) player.play()
     }
 
-    private fun preceding(id: String): List<Episode> = contextOrder.take(contextOrder.indexOf(id).coerceAtLeast(0))
-        .mapNotNull(store.library.value::episode).filter(Episode::isDownloaded).takeLast(5)
+    private suspend fun availableIds(library: Library): Set<String> = withContext(Dispatchers.IO) {
+        library.episodes.filter { ep -> ep.path?.let { File(it).isFile && File(it).length() > 0 } == true }.map(Episode::id).toSet()
+    }
 
-    private fun rebuildUpcoming() {
+    private suspend fun preceding(id: String): List<Episode> {
+        val library = store.library.value
+        val available = availableIds(library)
+        return contextOrder.take(contextOrder.indexOf(id).coerceAtLeast(0))
+            .filter { it in available }.mapNotNull(library::episode).takeLast(5)
+    }
+
+    private suspend fun rebuildUpcoming() {
         val id = player.currentMediaItem?.mediaId ?: return
         val library = store.library.value
+        val available = availableIds(library)
+        if (player.currentMediaItem?.mediaId != id) return
         val history = (0..player.currentMediaItemIndex).map { player.getMediaItemAt(it).mediaId }.toSet()
-        val available = library.episodes.filter { it.isDownloaded }.map { it.id }.toSet()
         val upcoming = Upcoming.plan(library.queue, contextOrder, contextCursor, id, history, available).mapNotNull(library::episode)
         val old = (player.currentMediaItemIndex + 1 until player.mediaItemCount).map { player.getMediaItemAt(it).mediaId }
         if (old == upcoming.map { it.id }) return
@@ -257,6 +318,8 @@ class PlaybackService : MediaSessionService() {
         const val START = "com.pod4me.START"
         const val MARK_UNHEARD = "com.pod4me.MARK_UNHEARD"
         const val STOP = "com.pod4me.STOP"
+        const val TOGGLE = "com.pod4me.TOGGLE"
+        const val PLAY_QUEUE = "com.pod4me.PLAY_QUEUE"
         const val BACK10 = "com.pod4me.BACK10"
         const val FORWARD10 = "com.pod4me.FORWARD10"
         private fun decodeOrder(value: String) = runCatching {
