@@ -26,7 +26,6 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
@@ -34,6 +33,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -50,6 +50,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlin.math.roundToInt
 
 @Composable
 fun PodApp(model: AppModel) {
@@ -75,8 +76,7 @@ fun PodApp(model: AppModel) {
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { it?.let(model::exportFeeds) }
     val backupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { it?.let(model::exportLibrary) }
     val restoreLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { restoreUri = it }
-    val colors = if (isSystemInDarkTheme()) darkColorScheme(primary = Color(0xFF88D5B4))
-        else lightColorScheme(primary = Color(0xFF176B52), secondary = Color(0xFF51675C), background = Color(0xFFF8FAF7))
+    val colors = if (isSystemInDarkTheme()) PodDarkColors else PodLightColors
     MaterialTheme(colorScheme = colors) {
         Scaffold(
             topBar = {
@@ -321,17 +321,19 @@ private fun EpisodeCard(ep: Episode, feed: String, current: Boolean, onDetails: 
                     else if (ep.downloadId != null) Text("Downloading…", style = MaterialTheme.typography.bodySmall)
                 }
                 CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 40.dp) {
+                    if (ep.isDownloaded) {
+                        ActionIcon(R.drawable.ic_delete, "Delete downloaded audio", enabled = !ep.protected && !current,
+                            onClick = { confirmDelete = true })
+                    }
+                    ActionIcon(R.drawable.ic_help, "Episode details", onClick = onDetails)
                     when {
                         ep.isDownloaded -> {
-                            ActionIcon(R.drawable.ic_delete, "Delete downloaded audio", enabled = !ep.protected && !current,
-                                onClick = { confirmDelete = true })
-                            ActionIcon(R.drawable.ic_play, "Play episode", onClick = onPlay)
                             ActionIcon(R.drawable.ic_queue_add, "Add to queue", onClick = onQueue)
+                            ActionIcon(R.drawable.ic_play, "Play episode", onClick = onPlay)
                         }
                         ep.downloadId != null -> ActionIcon(R.drawable.ic_close, "Cancel download", onClick = onCancel)
                         else -> ActionIcon(R.drawable.ic_download, "Download episode", onClick = onDownload)
                     }
-                    ActionIcon(R.drawable.ic_help, "Episode details", onClick = onDetails)
                 }
             }
             ep.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
@@ -353,10 +355,11 @@ private fun CompactEpisodeCard(ep: Episode, feed: String, current: Boolean, artw
                     Text(ep.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
+                IconButton(onClick = onDetails) { Icon(painterResource(R.drawable.ic_help), contentDescription = "Episode details") }
                 when {
                     ep.isDownloaded -> {
-                        IconButton(onClick = onPlay) { Icon(painterResource(R.drawable.ic_play), contentDescription = "Play episode") }
                         IconButton(onClick = onQueue) { Icon(painterResource(R.drawable.ic_queue_add), contentDescription = "Add to queue") }
+                        IconButton(onClick = onPlay) { Icon(painterResource(R.drawable.ic_play), contentDescription = "Play episode") }
                     }
                     ep.downloadId != null -> IconButton(onClick = onCancel) {
                         Icon(painterResource(R.drawable.ic_close), contentDescription = "Cancel download")
@@ -365,7 +368,6 @@ private fun CompactEpisodeCard(ep: Episode, feed: String, current: Boolean, artw
                         Icon(painterResource(R.drawable.ic_download), contentDescription = "Download episode")
                     }
                 }
-                IconButton(onClick = onDetails) { Icon(painterResource(R.drawable.ic_help), contentDescription = "Episode details") }
             }
             Text("${date(ep.published)} · ${if (ep.heard) "Heard" else "Unheard"}" +
                 (if (current) " · Current" else "") + (if (ep.stars > 0) " · ${"★".repeat(ep.stars)}" else ""),
@@ -476,6 +478,7 @@ private fun EpisodeDialog(ep: Episode, library: Library, model: AppModel, onDism
     val playback by model.player.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var confirmDelete by remember { mutableStateOf(false) }
+    var rating by remember(ep.id, ep.stars) { mutableIntStateOf(ep.stars) }
     val info by produceState<String?>(null, ep.id, library.catalogueRevision) {
         value = withContext(Dispatchers.IO) { Html.fromHtml(model.store.description(ep.id), Html.FROM_HTML_MODE_COMPACT).toString().trim() }
     }
@@ -486,10 +489,20 @@ private fun EpisodeDialog(ep: Episode, library: Library, model: AppModel, onDism
                 Text("Published: ${date(ep.published)}", style = MaterialTheme.typography.bodySmall)
                 ep.downloaded?.let { Text("Downloaded: ${date(it)}", style = MaterialTheme.typography.bodySmall) }
                 Text(if (ep.protected) "Protected by 4ever" else ep.expiry?.let { "Expires: ${date(it)}" } ?: "No expiry", style = MaterialTheme.typography.bodySmall)
-                Text("Rating", fontWeight = FontWeight.Bold)
-                FlowRow {
-                    (1..5).forEach { stars -> TextButton(onClick = { model.action { model.store.rate(ep.id, stars) } }) { Text(if (ep.stars == stars) "★ $stars" else "☆ $stars") } }
-                    if (ep.stars > 0) TextButton(onClick = { model.action { model.store.rate(ep.id, 0) } }) { Text("Clear rating") }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("${if (rating == 0) "☆" else "★"} $rating", maxLines = 1,
+                        fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    Slider(value = rating.toFloat(), onValueChange = { rating = it.roundToInt() },
+                        valueRange = 0f..5f, steps = 4,
+                        onValueChangeFinished = {
+                            val stars = rating
+                            if (stars != ep.stars) model.action { model.store.rate(ep.id, stars) }
+                        },
+                        modifier = Modifier.weight(1f).semantics {
+                            contentDescription = "Episode rating"
+                            stateDescription = if (rating == 0) "No rating" else "$rating of 5 stars"
+                        })
                 }
                 if (ep.isDownloaded) {
                     Text("Lists", fontWeight = FontWeight.Bold)

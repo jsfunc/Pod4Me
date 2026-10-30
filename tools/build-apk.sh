@@ -31,7 +31,7 @@ aapt="$ANDROID_HOME/build-tools/35.0.0/aapt"
 "$signer" verify "$apk"
 badging=$("$aapt" dump badging "$apk")
 case "$badging" in *application-debuggable*) printf 'Refusing to deliver a debuggable release.\n' >&2; exit 1;; esac
-case "$badging" in *"versionCode='9' versionName='1.0.1'"*) ;; *) printf 'Unexpected APK version.\n' >&2; exit 1;; esac
+case "$badging" in *"versionCode='10' versionName='1.0.2'"*) ;; *) printf 'Unexpected APK version.\n' >&2; exit 1;; esac
 if [ -f dist/Pod4Me.apk ]; then
     old_cert=$("$signer" verify --print-certs dist/Pod4Me.apk | sed -n '/Signer #1 certificate SHA-256 digest:/p')
     new_cert=$("$signer" verify --print-certs "$apk" | sed -n '/Signer #1 certificate SHA-256 digest:/p')
@@ -42,6 +42,6 @@ if [ -f dist/Pod4Me.apk ]; then
 fi
 mkdir -p dist
 cp "$apk" dist/Pod4Me.apk
-cp "$apk" dist/Pod4Me-1.0.1.apk
-(cd dist && sha256sum Pod4Me.apk > Pod4Me.apk.sha256 && sha256sum Pod4Me-1.0.1.apk > Pod4Me-1.0.1.apk.sha256)
+cp "$apk" dist/Pod4Me-1.0.2.apk
+(cd dist && sha256sum Pod4Me.apk > Pod4Me.apk.sha256 && sha256sum Pod4Me-1.0.2.apk > Pod4Me-1.0.2.apk.sha256)
 printf 'Verified non-debuggable v1 APK: %s/dist/Pod4Me.apk\n' "$PWD"

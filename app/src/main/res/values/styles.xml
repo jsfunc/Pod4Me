@@ -3,7 +3,8 @@
         <item name="android:fontFamily">sans</item>
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowActionModeOverlay">true</item>
-        <item name="android:colorAccent">#176B52</item>
+        <item name="android:colorAccent">@color/pod_accent</item>
     </style>
-    <color name="icon_background">#176B52</color>
+    <color name="icon_background">#F54927</color>
+    <color name="pod_accent">#B83216</color>
 </resources>
