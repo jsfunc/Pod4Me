@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -25,11 +27,15 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -92,7 +98,7 @@ fun PodApp(model: AppModel) {
                 Column {
                     if (page != "Player") MiniPlayer(library, model) { page = "Player" }
                     NavigationBar {
-                        listOf("Library" to R.drawable.ic_browse, "Latest" to R.drawable.ic_download, "Feeds" to R.drawable.ic_podcast, "Queue" to R.drawable.ic_queue_add, "Player" to R.drawable.ic_play).forEach { (name, icon) ->
+                        listOf("Library" to R.drawable.ic_browse, "Latest" to R.drawable.ic_download, "Feeds" to R.drawable.ic_feeds, "Queue" to R.drawable.ic_queue_add, "Player" to R.drawable.ic_play).forEach { (name, icon) ->
                             NavigationBarItem(selected = page == name, onClick = { page = name; if (name == "Latest") browseFeed = null },
                                 modifier = Modifier.height(64.dp), alwaysShowLabel = false,
                                 icon = { Icon(painterResource(icon), contentDescription = name, modifier = Modifier.size(24.dp)) })
@@ -114,6 +120,11 @@ fun PodApp(model: AppModel) {
                         onRefresh = model::refresh, onSuggest = { share(context, Suggestions.feed(it)) }, onUnsubscribe = { unsubscribingFeed = it })
                     "Library", "Latest" -> {
                         val downloaded = page == "Library"
+                        var searchOpen by rememberSaveable(page, browseFeed) { mutableStateOf(false) }
+                        var searchQuery by rememberSaveable(page, browseFeed) { mutableStateOf("") }
+                        val searching = !downloaded && browseFeed != null && searchOpen && searchQuery.isNotBlank()
+                        val search = rememberFeedSearch(model, browseFeed.takeIf { !downloaded && searchOpen },
+                            library.catalogueRevision, searchQuery)
                         if (downloaded) {
                             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text("Downloads", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
@@ -130,9 +141,27 @@ fun PodApp(model: AppModel) {
                         } else {
                             Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text(browseFeed?.let(library::feedName) ?: "Latest episodes", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                                if (browseFeed != null) ActionIcon(if (searchOpen) R.drawable.ic_close else R.drawable.ic_search,
+                                    if (searchOpen) "Close search" else "Search this feed", onClick = { searchOpen = !searchOpen; searchQuery = "" })
                                 if (browseFeed != null) TextButton(onClick = { browseFeed = null }) { Text("All feeds") }
                             }
-                            Text("Newest published first", Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.labelMedium)
+                            if (browseFeed != null && searchOpen) {
+                                val focus = remember { FocusRequester() }
+                                val keyboard = LocalSoftwareKeyboardController.current
+                                OutlinedTextField(value = searchQuery, onValueChange = { searchQuery = it.take(256) },
+                                    label = { Text("Search titles and descriptions") }, singleLine = true,
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).focusRequester(focus),
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                    keyboardActions = KeyboardActions(onSearch = { keyboard?.hide() }),
+                                    trailingIcon = { if (searchQuery.isNotEmpty()) ActionIcon(R.drawable.ic_close, "Clear search",
+                                        onClick = { searchQuery = ""; focus.requestFocus() }) })
+                                LaunchedEffect(Unit) { focus.requestFocus() }
+                            }
+                            Text(if (searching) when {
+                                search.loading -> "Searching…"
+                                search.error != null -> "Search unavailable"
+                                else -> "${search.ids.size} matches · Best match first"
+                            } else "Newest published first", Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.labelMedium)
                         }
                         val episodeIds = remember(library.catalogueRevision, page, filter, sort, browseFeed,
                             if (sort == TrackSort.PROGRESS && downloaded) library.episodes else null) {
@@ -148,15 +177,21 @@ fun PodApp(model: AppModel) {
                             }
                         }.sorted(if (!downloaded) TrackSort.PUBLICATION else sort, library).map(Episode::id)
                         }
-                        val episodes = remember(episodeIds, library.episodes) { episodeIds.mapNotNull(library::episode) }
-                        val playOrder = remember(episodeIds, library.catalogueRevision) { episodes.filter(Episode::isDownloaded).map(Episode::id) }
-                        if (episodes.isEmpty()) EmptyState(if (library.feeds.isEmpty()) "Add your first RSS feed in Feeds, or share a podcast link into Pod4Me." else if (downloaded) "No downloads in this view. Open Latest to download episodes." else "No episodes here. Press Refresh to check the feed.")
+                        val visibleIds = if (searching) search.ids else episodeIds
+                        val episodes = remember(visibleIds, library.episodes) { visibleIds.mapNotNull(library::episode) }
+                        val playOrder = remember(visibleIds, library.catalogueRevision) { episodes.filter(Episode::isDownloaded).map(Episode::id) }
+                        if (episodes.isEmpty()) EmptyState(if (searching) when {
+                            search.loading -> "Searching titles and descriptions…"
+                            search.error != null -> search.error
+                            else -> "No matching episodes. Try fewer words or another spelling."
+                        } else if (library.feeds.isEmpty()) "Add your first RSS feed in Feeds, or share a podcast link into Pod4Me." else if (downloaded) "No downloads in this view. Open Latest to download episodes." else "No episodes here. Press Refresh to check the feed.")
                         else LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(if (downloaded) 8.dp else 4.dp)) {
                             items(episodes, key = Episode::id) { ep -> EpisodeCard(ep, library.feedName(ep.feedId), currentId == ep.id,
                                 onDetails = { selectedId = ep.id },
                                 onPlay = { model.action { model.player.play(ep.id, playOrder) } },
                                 onDownload = { model.action { model.store.download(ep.id) } },
                                 onCancel = { model.action { model.store.cancelDownload(ep.id) } },
+                                onDelete = { model.action { model.store.deleteAudio(ep.id) } },
                                 onQueue = { model.action { model.store.enqueue(ep.id) } }, compact = !downloaded,
                                 artworkUrl = library.feedArtwork(ep.feedId)) }
                         }
@@ -261,12 +296,13 @@ private fun SortSelector(sort: TrackSort, onChange: (TrackSort) -> Unit) {
 
 @Composable
 private fun EpisodeCard(ep: Episode, feed: String, current: Boolean, onDetails: () -> Unit, onPlay: () -> Unit,
-    onDownload: () -> Unit, onCancel: () -> Unit, onQueue: () -> Unit, compact: Boolean = false,
+    onDownload: () -> Unit, onCancel: () -> Unit, onDelete: () -> Unit, onQueue: () -> Unit, compact: Boolean = false,
     artworkUrl: String? = null) {
     if (compact) {
         CompactEpisodeCard(ep, feed, current, artworkUrl, onDetails, onPlay, onDownload, onCancel, onQueue)
         return
     }
+    var confirmDelete by remember(ep.id) { mutableStateOf(false) }
     OutlinedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -284,19 +320,25 @@ private fun EpisodeCard(ep: Episode, feed: String, current: Boolean, onDetails: 
                         style = MaterialTheme.typography.bodySmall)
                     else if (ep.downloadId != null) Text("Downloading…", style = MaterialTheme.typography.bodySmall)
                 }
-                when {
-                    ep.isDownloaded -> {
-                        ActionIcon(R.drawable.ic_play, "Play episode", onClick = onPlay)
-                        ActionIcon(R.drawable.ic_queue_add, "Add to queue", onClick = onQueue)
+                CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 40.dp) {
+                    when {
+                        ep.isDownloaded -> {
+                            ActionIcon(R.drawable.ic_delete, "Delete downloaded audio", enabled = !ep.protected && !current,
+                                onClick = { confirmDelete = true })
+                            ActionIcon(R.drawable.ic_play, "Play episode", onClick = onPlay)
+                            ActionIcon(R.drawable.ic_queue_add, "Add to queue", onClick = onQueue)
+                        }
+                        ep.downloadId != null -> ActionIcon(R.drawable.ic_close, "Cancel download", onClick = onCancel)
+                        else -> ActionIcon(R.drawable.ic_download, "Download episode", onClick = onDownload)
                     }
-                    ep.downloadId != null -> ActionIcon(R.drawable.ic_close, "Cancel download", onClick = onCancel)
-                    else -> ActionIcon(R.drawable.ic_download, "Download episode", onClick = onDownload)
+                    ActionIcon(R.drawable.ic_help, "Episode details", onClick = onDetails)
                 }
-                ActionIcon(R.drawable.ic_help, "Episode details", onClick = onDetails)
             }
             ep.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         }
     }
+    if (confirmDelete) DeleteAudioDialog(enabled = ep.isDownloaded && !ep.protected && !current,
+        onDismiss = { confirmDelete = false }, onDelete = { onDelete(); confirmDelete = false })
 }
 
 @Composable
@@ -490,10 +532,17 @@ private fun EpisodeDialog(ep: Episode, library: Library, model: AppModel, onDism
                 }
             }
         }, confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } })
-    if (confirmDelete) AlertDialog(onDismissRequest = { confirmDelete = false }, title = { Text("Delete audio?") },
+    if (confirmDelete) DeleteAudioDialog(enabled = ep.isDownloaded && !ep.protected && playback.id != ep.id,
+        onDismiss = { confirmDelete = false },
+        onDelete = { model.action { model.store.deleteAudio(ep.id); onDismiss() }; confirmDelete = false })
+}
+
+@Composable
+private fun DeleteAudioDialog(enabled: Boolean, onDismiss: () -> Unit, onDelete: () -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Delete audio?") },
         text = { Text("Ratings, bookmarks and playback history will be kept. You can download the episode again.") },
-        confirmButton = { TextButton(onClick = { model.action { model.store.deleteAudio(ep.id); onDismiss() }; confirmDelete = false }) { Text("Delete") } },
-        dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } })
+        confirmButton = { TextButton(enabled = enabled, onClick = onDelete) { Text("Delete") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @Composable

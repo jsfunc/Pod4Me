@@ -6,11 +6,9 @@ For future development, start with [AGENTS.md](AGENTS.md) and the [development h
 
 ## Build status
 
-The v1 source is **1.0.0 (version code 8)**. It addresses the audit's playback, library performance, parser, download cleanup, backup and release-packaging findings while retaining the compact layouts. Validation results and remaining device checks are recorded in [v1 verification](docs/v1-verification.md).
+The current source is **1.0.1 (version code 9)**. It adds ranked search inside each feed, alongside the Downloads bin and corrected Feeds navigation icon. Search covers stored titles and descriptions, including undownloaded episodes, ignores case and accents, and tolerates small typos. The release build passed 96 core checks, 10 schema/XML checks, 45 unit tests, and lint with zero errors (22 warnings); device-test compilation also passed. Phone checks remain pending. Details are recorded in [v1 verification](docs/v1-verification.md).
 
-**Follow-up source correction:** RSS documents using a default namespace are now supported, with namespace isolation retained. The shared-feed restore already keeps ID `shared`; its regression test now also starts a subsequent download. The corrected source passes 96 core checks and 35 unit tests. The corrected APK was rebuilt successfully and verified; `dist/Pod4Me.apk` includes this correction.
-
-The signed v1 APK was built successfully on 2026-10-29 via the normal-terminal build script: 35 Android unit tests passed, release lint reported zero errors (22 warnings), and Android device tests compiled. Independent APK checks confirmed version 1.0.0, a non-debuggable application and the same signing certificate as the previous local APK. The S24 device checks remain pending.
+This release uses the same signing key as this computer’s previous 1.0.0 APK, so it can update that installation. The user previously accepted switching from the other computer’s key through a fresh installation; that older certificate remains different. Keep the current key for future updates and copy it privately when moving computers. See the [handover](docs/handover.md) for signing details.
 
 ## Build an installable APK
 
@@ -19,16 +17,16 @@ On Ubuntu, from a normal terminal with internet access:
 ```bash
 sudo apt-get update
 sudo apt-get install -y openjdk-17-jdk curl unzip
-cd /home/aurelien/repo/pod4me
+cd /home/aurelien/repo/Pod4Me
 ./tools/setup-android.sh
 ./tools/build-apk.sh
 ```
 
 Review and accept the Android SDK licenses when prompted. The setup script installs command-line tools, SDK platform 36, build tools 35.0.0, and platform-tools in `~/Android/Sdk`. Gradle and dependencies are cached in `~/.gradle`; both locations are shared with future projects. Set `ANDROID_HOME` or `GRADLE_USER_HOME` to override them. A full JDK 17 is required; a Java runtime without compiler tools is insufficient.
 
-The build script runs core/schema checks, Android unit tests, release lint, release assembly and compilation of device tests. It produces a signed, non-debuggable **`dist/Pod4Me.apk`**, `dist/Pod4Me-1.0.0.apk`, and SHA-256 checksums. The APK supports Android 14+ (minimum API 34, compile/target API 36), including Android 17. Compatibility with the specific One UI 9 device still needs testing.
+The build script runs core/schema checks, Android unit tests, release lint, release assembly and compilation of device tests. It produces a signed, non-debuggable **`dist/Pod4Me.apk`**, `dist/Pod4Me-1.0.1.apk`, and SHA-256 checksums. The APK supports Android 14+ (minimum API 34, compile/target API 36), including Android 17. Compatibility with the specific One UI 9 device still needs testing.
 
-Transfer the APK to the phone and open it, allowing installation from the app used to open the file. For existing local installs, the script copies `~/.android/debug.keystore` once to the dedicated `~/.android/pod4me-v1.keystore`. This preserves the existing signing certificate, so v1 installs as an update without uninstalling or losing data. The release APK is **not debuggable**, even though its certificate is retained from earlier builds. Keep a private backup of that keystore. The script also compares the certificate with an existing `dist/Pod4Me.apk` and stops on mismatch.
+Transfer the APK to the phone and open it, allowing installation from the app used to open the file. For existing local installs, the script copies `~/.android/debug.keystore` once to the dedicated `~/.android/pod4me-v1.keystore`. Updates preserve data when this key matches the installed APK. On another computer, copy the existing personal keystore privately instead of adopting that computer’s debug key. The release APK is **not debuggable**, even though its certificate is retained from earlier builds. Keep a private backup of that keystore. The script also compares the certificate with an existing `dist/Pod4Me.apk` and stops on mismatch.
 
 To use an existing personal keystore instead, set `POD4ME_KEYSTORE`, `POD4ME_STORE_PASSWORD`, `POD4ME_KEY_ALIAS` and `POD4ME_KEY_PASSWORD`. Its certificate must match the installed app to update it. Changing certificates is a separate migration; do not uninstall your current app to resolve a signing error.
 
@@ -48,12 +46,13 @@ export PATH="$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-t
 
 - **Feeds:** subscribe using an RSS/Atom URL; export UTF-8 text with one `url [podcast title]` per line. Import accepts both this format and plain URLs, ignoring everything after the URL on each line. Larger artwork spans the item height on the left. The title, Browse/Settings/Refresh controls, episode counts, expiry and smaller Suggest/Unsubscribe controls sit to its right. Long-press an icon for its label. Refresh is always manual.
 - **Latest:** browse compact episode rows by publication date or browse one feed. Larger artwork spans the item height; the feed name, title, date, played percentage, expiry and controls sit to its right. Use the download-arrow button to download and the question-mark button for details. Downloads are manual and allow mobile data (roaming is disabled). Android handles downloads and their notifications even when the UI is closed.
-- **Library:** browse downloaded episodes by list or feed; sort by publication date, download date, stars, feed name, or played percentage. Compact cards put Play, Add to queue and Details icons beside date/progress/expiry; progress appears as `41%` and expiry omits the year. Starred also includes rated episodes whose audio has expired, so they can be downloaded again.
+- **Search inside a feed:** open a feed with Browse, then tap the magnifying glass beside its heading. Results update as you type (after a brief pause), highest relevance first. All query words must match somewhere in the title or description, in any order. Exact and title matches score higher; partial words of at least three characters and one-letter typos/transpositions in words of at least four characters are supported. Search ignores case/accents, works offline, and includes undownloaded episodes and retained feed history. Refresh manually to discover new feed entries. It does not query an external catalogue or expand synonyms. Clear or close search to return to newest-first order.
+- **Library:** browse downloaded episodes by list or feed; sort by publication date, download date, stars, feed name, or played percentage. Compact cards put Delete, Play, Add to queue and Details icons beside date/progress/expiry, with tighter button spacing; deletion asks for confirmation and is disabled for 4ever and the current episode; progress appears as `41%` and expiry omits the year. Starred also includes rated episodes whose audio has expired, so they can be downloaded again.
 - **Details:** manage list memberships, rate episodes, read/select/copy show notes, copy the direct audio URL, suggest an episode, visit bookmarks, or delete audio.
 - **Queue:** use the up/down arrows to reorder and the bin to remove explicitly queued episodes; controls appear beside each title, with larger artwork spanning the full item height on the left. Removing a queue entry keeps its audio. When empty, playback follows the source list order captured when Play was pressed. Previous/Next and headphone controls use the actual player timeline. Starting in the middle includes up to five preceding downloaded episodes. Restored queue entries with missing audio offer a download button and are skipped until downloaded.
 - **Player:** background playback, position scrubbing, a single row of playback controls, ±10 seconds, previous/next, global speed from 1.0× to 3.0×, and optionally named bookmarks. Playback positions persist periodically and on pause/seek/track changes.
 
-Bottom navigation uses five equally sized icon-only buttons; their names remain available to accessibility services. The Library card layout is unchanged.
+Bottom navigation uses five equally sized icon-only buttons; their names remain available to accessibility services. Feeds uses a dedicated microphone icon without launcher padding so it appears comparable in size to the others. Library keeps its compact cards and 40 dp artwork.
 
 Feed artwork appears next to feeds and episodes in Feeds, Library, Queue, Latest, and the player. RSS images, iTunes artwork, and Atom logos/icons are supported. Press **Refresh** after upgrading to retrieve artwork for existing feeds. Images are cached; feeds with missing or unavailable artwork display a podcast symbol. Database migrations preserve existing library data.
 

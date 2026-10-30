@@ -10,6 +10,8 @@ import android.net.Uri
 import android.os.Environment
 import com.pod4me.domain.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -74,6 +76,30 @@ class LibraryStore(private val context: Context) : AutoCloseable {
     suspend fun initialize() = write(force = true) { Unit }
     suspend fun description(id: String): String = withContext(Dispatchers.IO) {
         mutex.withLock { helper.readableDatabase.rows("SELECT description FROM episodes WHERE id=?", id) { it.str("description") }.firstOrNull().orEmpty() }
+    }
+
+    /** Read a feed in small batches, releasing the store lock before parsing/indexing its notes. */
+    suspend fun feedSearchIndex(feedId: String): List<FeedSearch.Document> = withContext(Dispatchers.IO) {
+        data class Row(val rowId: Long, val id: String, val published: Long, val title: String, val notes: String)
+        val documents = mutableListOf<FeedSearch.Document>()
+        var after = 0L
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val batch = mutex.withLock {
+                helper.readableDatabase.rows(
+                    "SELECT rowid AS search_rowid,id,published,title,description FROM episodes WHERE feed_id=? AND rowid>? ORDER BY rowid LIMIT 32",
+                    feedId, after.toString(),
+                ) { Row(it.long("search_rowid"), it.str("id"), it.long("published"), it.str("title"), it.str("description")) }
+            }
+            if (batch.isEmpty()) break
+            for (row in batch) {
+                currentCoroutineContext().ensureActive()
+                val notes = android.text.Html.fromHtml(row.notes, android.text.Html.FROM_HTML_MODE_COMPACT).toString()
+                documents += FeedSearch.document(row.id, row.published, row.title, notes)
+            }
+            after = batch.last().rowId
+        }
+        documents
     }
 
     suspend fun exportLibrary(output: java.io.OutputStream) = withContext(Dispatchers.IO) {

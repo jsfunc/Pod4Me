@@ -54,6 +54,39 @@ class LibraryStoreTest {
         assertFalse(file.exists())
         assertFalse(store.library.value.episodes.single().isDownloaded)
     }
+
+    @Test fun feedSearchIncludesUndownloadedDescriptionsButNotOtherFeedsOrHtmlAttributes() = runBlocking {
+        val feedId = store.saveFeed("https://example.com/search", FeedParser.Feed("Search", listOf(
+            FeedParser.Item("notes", "Other title", "https://example.com/notes.mp3",
+                "<p>Économie &amp; océan</p><a href='https://secretattribute.example'>Listen</a>", 10, 0),
+            FeedParser.Item("title", "Économie océan", "https://example.com/title.mp3", "", 1, 0))))
+        store.saveFeed("https://example.com/elsewhere", FeedParser.Feed("Other", listOf(
+            FeedParser.Item("other", "Économie océan", "https://example.com/other.mp3", "", 100, 0))))
+        val episodes = store.library.value.episodes.filter { it.feedId == feedId }
+        assertTrue(episodes.all { !it.isDownloaded && it.description.isEmpty() })
+        val index = store.feedSearchIndex(feedId)
+        assertEquals(listOf(episodes.single { it.title == "Économie océan" }.id, episodes.single { it.title == "Other title" }.id),
+            FeedSearch.rank(index, "ocean economie"))
+        assertTrue(FeedSearch.rank(index, "secretattribute").isEmpty())
+        assertTrue(store.library.value.episodes.all { it.description.isEmpty() })
+    }
+
+    @Test fun feedSearchReadsEveryBatchAndRefreshesDescriptionsWithoutLosingRetainedHistory() = runBlocking {
+        val items = (1..70).map { FeedParser.Item("search-$it", "Episode $it", "https://example.com/$it.mp3", "astronomy", it.toLong(), 0) }
+        val feedId = store.saveFeed("https://example.com/many", FeedParser.Feed("Many", items))
+        val index = store.feedSearchIndex(feedId)
+        assertEquals(70, index.size)
+        assertEquals(70, FeedSearch.rank(index, "astronmy").size)
+        val last = store.library.value.episodes.single { it.feedId == feedId && it.title == "Episode 70" }
+        val revision = store.library.value.catalogueRevision
+        store.saveFeed("https://example.com/many", FeedParser.Feed("Many", listOf(
+            FeedParser.Item("search-70", "Episode 70", "https://example.com/70.mp3", "botany", 70, 0))), feedId)
+        assertTrue(store.library.value.catalogueRevision > revision)
+        val updated = store.feedSearchIndex(feedId)
+        assertEquals(70, updated.size)
+        assertEquals(listOf(last.id), FeedSearch.rank(updated, "botany"))
+        assertEquals(69, FeedSearch.rank(updated, "astronomy").size)
+    }
     @Test fun activeTrackSurvivesLaunchCleanup() = runBlocking {
         store.activate(episode.id)
         store.expireAtLaunch(100)

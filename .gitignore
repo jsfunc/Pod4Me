@@ -7,3 +7,8 @@ local.properties
 *.keystore
 .tools/
 dist/
+
+# Local Codex CLI install (not part of the app; contains >100 MB binaries)
+node_modules/
+package.json
+package-lock.json
