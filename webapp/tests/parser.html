@@ -1,0 +1,45 @@
+<!doctype html><meta charset="utf-8"><title>Pod4Me XML parser tests</title>
+<pre id="results">Running…</pre>
+<script type="module">
+const {parseFeed, parseFeedList} = await import(location.protocol === 'file:' ? '../public/app/domain.mjs' : '/app/domain.mjs');
+const results = [];
+function assert(value, message) { if (!value) throw new Error(message); }
+function check(name, run) { try { run(); results.push({name, ok:true}); } catch (error) { results.push({name, ok:false, error:error.message}); } }
+const base = 'https://feeds.podcast.org/shows/feed.xml';
+check('RSS: namespaced metadata, xml:base, audio-only, dates, duration and inert notes', () => {
+  const xml = `<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:content="http://purl.org/rss/1.0/modules/content/" xml:base="https://cdn.podcast.org/base/"><channel><title>Culture &amp; Sciences</title><itunes:image href="art.jpg"/><item xml:base="episodes/"><guid>guid-one</guid><title>Épisode &amp; more</title><pubDate>Sat, 31 Oct 2026 12:00:00 GMT</pubDate><itunes:duration>01:02:03</itunes:duration><enclosure url="movie.mp4" type="video/mp4"/><enclosure url="one.mp3" type="audio/mpeg"/><content:encoded><![CDATA[<p>Hello &amp; welcome.</p><img src="https://parser-must-not-fetch.invalid/leak" onerror="window.parserExecuted=true"><script>window.parserExecuted=true<\/script><p>Next line<br>End</p>]]></content:encoded></item><item><title>Video only</title><enclosure url="two.mp4" type="video/mp4"/></item><item><guid>no-type</guid><enclosure url="three.m4a"/></item></channel></rss>`;
+  const parsed = parseFeed(xml, base);
+  assert(parsed.name === 'Culture & Sciences', parsed.name);
+  assert(parsed.artworkUrl === 'https://cdn.podcast.org/base/art.jpg', parsed.artworkUrl);
+  assert(parsed.episodes.length === 2 && parsed.skipped === 1, 'Audio filtering');
+  assert(parsed.episodes[0].audioUrl === 'https://cdn.podcast.org/base/episodes/one.mp3', 'Relative xml:base');
+  assert(parsed.episodes[0].duration === 3723, 'Duration in seconds');
+  assert(parsed.episodes[0].published === Date.UTC(2026,9,31,12), 'Publication timestamp');
+  assert(parsed.episodes[0].description === 'Hello & welcome.\nNext line\nEnd', parsed.episodes[0].description);
+  assert(!window.parserExecuted, 'Description executed script');
+});
+check('Atom: enclosure, XHTML content, publication fallback and relative artwork', () => {
+  const xml = `<feed xmlns="http://www.w3.org/2005/Atom" xml:base="https://podcast.org/"><title>Atom show</title><logo>art.png</logo><entry xml:base="/audio/"><id>atom-one</id><title>Hello</title><updated>2026-01-02T03:04:05Z</updated><link rel="alternate" href="webpage"/><link rel="enclosure" href="one.ogg" type="audio/ogg"/><content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>One &amp; two</p><p>Three</p></div></content></entry></feed>`;
+  const parsed = parseFeed(xml, base);
+  assert(parsed.episodes[0].audioUrl === 'https://podcast.org/audio/one.ogg', 'Atom relative link');
+  assert(parsed.episodes[0].description === 'One & two\nThree', parsed.episodes[0].description);
+  assert(parsed.episodes[0].published === Date.UTC(2026,0,2,3,4,5), 'Atom updated');
+});
+check('Malformed XML, document types and ordinary webpages are rejected', () => {
+  for (const xml of ['<rss><channel></rss>', '<!DOCTYPE rss [<!ENTITY x SYSTEM "file:///secret">]><rss><channel/></rss>', '<html><body>Not RSS</body></html>']) {
+    let rejected = false;
+    try { parseFeed(xml, base); } catch { rejected = true; }
+    assert(rejected, `Accepted ${xml}`);
+  }
+});
+check('OPML: nested folders, titles, duplication and URL validation', () => {
+  const parsed = parseFeedList('<?xml version="1.0"?><opml version="2.0"><body><outline text="Folder"><outline text="A &amp; B" xmlUrl="https://a.org/rss"/><outline title="C" xmlUrl="https://c.org/rss"/><outline xmlUrl="https://a.org/rss"/></outline></body></opml>');
+  assert(parsed.length === 2 && parsed[0].name === 'A & B', 'OPML folder parsing');
+  let rejected = false;
+  try { parseFeedList('<opml><body><outline xmlUrl="http://localhost/rss"/></body></opml>'); } catch { rejected = true; }
+  assert(rejected, 'Unsafe OPML URL accepted');
+});
+window.__parserResults = results;
+document.querySelector('#results').textContent = JSON.stringify(results, null, 2);
+document.title = results.every(result => result.ok) ? 'PASS' : 'FAIL';
+</script>

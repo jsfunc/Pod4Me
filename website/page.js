@@ -4,6 +4,7 @@ function renderRecommendation() {
   const error = document.getElementById("error");
   const action = document.getElementById("open-app");
   content.hidden = true;
+  document.getElementById("open-web").href = "/app/";
   error.hidden = true;
   action.removeAttribute("href");
   document.getElementById("title").textContent = "Your next good listen.";
@@ -18,6 +19,7 @@ function renderRecommendation() {
     document.getElementById("source").textContent = "From " + new URL(item.feed || item.url).hostname;
     action.href = Pod4MeLinks.intent(item);
     content.hidden = false;
+    document.getElementById("open-web").href = "/app/" + location.hash;
   } catch (failure) {
     error.textContent = failure.message;
     error.hidden = false;

@@ -2,6 +2,8 @@
 
 A local Android podcast manager for a Galaxy S24 and newer phones. Native Kotlin / Jetpack Compose UI, SQLite storage, Android DownloadManager downloads, and Media3 background playback. No accounts, analytics, or application server.
 
+**New: the independent web app for iPhone and laptops is live at [Pod4Me web](https://pod4me.aurelien-garivier.workers.dev/app/).** It supports subscriptions, feed-list import/export, episode browsing, streaming, sharing, queues, lists, stars, bookmarks and personalised podcast suggestions. Android and web exchange feed lists and recommendation links; they do not automatically synchronize. The complete Cloudflare Worker + assets package is `dist/Pod4Me-web.zip`, with deployment instructions in `dist/Pod4Me-web/README.txt`. Public deployment was verified on 2026-10-31: feed subscriptions and streaming work. **Known issue:** Apple rejects directory requests from the deployed Worker (search HTTP 429, chart HTTP 403), so Discover needs a follow-up fix; use RSS addresses or feed-list import meanwhile. See [web app features, setup and checks](docs/web-app.md). The Android APK and its ENS download are unchanged by the web work.
+
 For future development, start with [AGENTS.md](AGENTS.md) and the [development handover](docs/handover.md), which record the accepted requirements, current state, build/signing workflow and pending checks.
 
 ## Build status
@@ -76,7 +78,7 @@ Version 1.0.10 sends a readable title and one HTTPS recommendation link through 
 
 Older `pod4me://` messages remain supported and do not become clickable web links automatically: send a fresh recommendation after updating. Feeds → Open shared message → Paste → Open remains a fallback for complete messages, HTTPS recommendations and direct feed/audio URLs. Clipboard text is read only on Paste; input is limited to 64,000 characters and invalid input stays in the dialog with an explanation. Ordinary episode webpage links are not resolved into audio URLs.
 
-The website and Android association JSON have been checked publicly; device check 41 remains pending. The user requires no payment/card registration and has accepted keeping the APK on ENS; the R2 migration is cancelled. The signed `Pod4Me.apk` is available in the ENS diffusion folder. The existing website already links there, so no website re-upload or app rebuild is needed. Verified on 2026-10-31: the ENS download returns HTTP 200 and exactly matches the signed 1.0.10 release. Upload the new 1.0.11 APK to replace that hosted version when ready.
+The website and Android association JSON have been checked publicly; device check 41 remains pending. The user requires no payment/card registration and has accepted keeping the APK on ENS; the R2 migration is cancelled. The signed `Pod4Me.apk` is available in the ENS diffusion folder. The existing website already links there, so no website re-upload or app rebuild is needed. Verified on 2026-10-31 at 17:43 UTC: the ENS download returns HTTP 200 and exactly matches the signed 1.0.11 release (29,045,117 bytes, SHA-256 `c3fd538230cee20d655743e4aed3d90b5b524c462bc17264daad1376289bd299`).
 
 ## Discover podcasts
 

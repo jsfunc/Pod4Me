@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#bd431f"><meta name="color-scheme" content="light dark">
+<meta name="description" content="Your podcasts, at your pace. Listen, organise and share with Pod4Me on your phone or laptop.">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https: data:; media-src https: http: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'">
+<link rel="manifest" href="./manifest.webmanifest"><link rel="icon" href="./icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="./icon-192.png"><link rel="stylesheet" href="./app.css">
+<title>Pod4Me · Your listening space</title><script type="module" src="./app.mjs"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<aside class="sidebar" aria-label="Library navigation">
+  <a class="brand" href="./" aria-label="Pod4Me home"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>Pod4Me<small>YOUR LISTENING SPACE</small></span></a>
+  <nav id="navigation" aria-label="Main navigation"></nav>
+  <div class="sidebar-lists"><div class="section-label">YOUR LISTS <button class="icon-button" data-action="new-list" aria-label="Create a list">＋</button></div><div id="list-navigation"></div></div>
+  <div class="local-note"><span class="status-dot"></span><div>Yours, on this device<small>No account. No automatic sync.</small></div></div>
+</aside>
+<div class="workspace">
+  <header class="topbar"><div class="mobile-brand"><span class="small-mark">p</span>Pod4Me</div><label class="search"><span aria-hidden="true">⌕</span><input id="library-search" type="search" placeholder="Search your episodes…" aria-label="Search your episodes" maxlength="256" autocomplete="off"><kbd>/</kbd></label><button class="primary add-button" data-action="add-feed"><span aria-hidden="true">＋</span> Add podcast</button></header>
+  <div id="storage-warning" class="banner warning" hidden></div><div id="connection-banner" class="banner" hidden></div>
+  <div id="operation" class="operation" role="status" hidden></div>
+  <main id="main" tabindex="-1"><div class="loading-state">Opening your library…</div></main>
+  <footer class="page-footer">Made for a good listen. <button class="text-button" data-action="settings">Your data &amp; settings</button></footer>
+</div>
+<section class="player" aria-label="Audio player">
+  <div id="now-playing" class="now-playing"><div class="cover placeholder" aria-hidden="true">♫</div><div><strong>Make time for a good listen</strong><span>Choose an episode to start</span></div></div>
+  <div class="transport"><div class="transport-buttons"><button class="icon-button" data-action="previous" aria-label="Previous episode" disabled>⏮</button><button class="icon-button seek-button" data-action="back" aria-label="Back ten seconds" disabled>−10</button><button id="play-toggle" class="play-button" data-action="toggle-play" aria-label="Play" disabled>▶</button><button class="icon-button seek-button" data-action="forward" aria-label="Forward ten seconds" disabled>+10</button><button class="icon-button" data-action="next" aria-label="Next episode" disabled>⏭</button></div><div class="seek-row"><span id="elapsed">0:00</span><input id="seek" type="range" min="0" max="100" step="0.1" value="0" aria-label="Playback position" disabled><span id="duration">0:00</span></div></div>
+  <div class="player-tools"><label class="speed-label"><span class="sr-only">Playback speed</span><select id="speed" aria-label="Playback speed"><option value="1">1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="1.75">1.75×</option><option value="2">2×</option><option value="2.5">2.5×</option><option value="3">3×</option></select></label><button class="icon-button" data-action="bookmark-current" aria-label="Bookmark this moment" title="Bookmark this moment" disabled>⚑</button><button class="icon-button" data-action="queue" aria-label="Open queue" title="Open queue">☷</button></div>
+  <audio id="audio" preload="none"></audio>
+</section>
+<dialog id="dialog" aria-labelledby="dialog-title"><header class="dialog-header"><h2 id="dialog-title"></h2><button class="icon-button" data-action="close-dialog" aria-label="Close dialog">×</button></header><div id="dialog-content"></div></dialog>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<input type="file" id="feed-file" accept=".txt,.opml,.xml,text/plain,text/xml,application/xml" hidden>
+<input type="file" id="backup-file" accept=".json,application/json" hidden>
+<noscript><div class="banner warning">Pod4Me needs JavaScript to manage your library and play episodes.</div></noscript>
+</body></html>
