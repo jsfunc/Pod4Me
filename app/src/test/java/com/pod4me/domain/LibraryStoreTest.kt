@@ -126,6 +126,40 @@ class LibraryStoreTest {
         assertEquals("My name", store.library.value.feeds.single().name)
         assertTrue(store.library.value.episodes.single().isDownloaded)
     }
+
+    @Test fun latestRefreshHighlightsOnlyNewIdentitiesAndSurvivesReopening() = runBlocking {
+        val url = "https://example.com/feed"
+        val updated = FeedParser.Item("guid", "Edited old episode", "https://example.com/audio.mp3", "Changed", 999, 10_000)
+        // A late-discovered episode is new even if its publication date is old.
+        val added = FeedParser.Item("new", "New arrival", "https://example.com/new.mp3", "", 1, 10_000)
+        assertTrue(store.library.value.episode(episode.id)!!.newInLastRefresh)
+        store.saveFeed(url, FeedParser.Feed("Feed", listOf(updated, added, added)), episode.feedId)
+        assertFalse(store.library.value.episode(episode.id)!!.newInLastRefresh)
+        val newEpisode = store.library.value.episodes.single { it.title == "New arrival" }
+        assertTrue(newEpisode.newInLastRefresh)
+        store.progress(newEpisode.id, 500, 10_000)
+        store.close()
+        store = LibraryStore(RuntimeEnvironment.getApplication())
+        store.initialize()
+        assertTrue(store.library.value.episode(newEpisode.id)!!.newInLastRefresh)
+        store.saveFeed(url, FeedParser.Feed("Feed", listOf(updated)), episode.feedId)
+        assertEquals(2, store.library.value.episodes.size) // Retained history also loses its old highlight.
+        assertTrue(store.library.value.episodes.none { it.newInLastRefresh })
+    }
+
+    @Test fun refreshMarkersArePerFeedAndFailuresOrUnsubscribeRacesPreserveThem() = runBlocking {
+        val otherUrl = "https://example.com/other"
+        val other = FeedParser.Feed("Other", listOf(FeedParser.Item("other", "Other", "https://example.com/other.mp3", "", 1, 0)))
+        val otherId = store.saveFeed(otherUrl, other)
+        store.feedError(episode.feedId, "Offline")
+        assertTrue(store.library.value.episode(episode.id)!!.newInLastRefresh)
+        store.saveFeed(otherUrl, other, otherId)
+        assertFalse(store.library.value.episodes.single { it.feedId == otherId }.newInLastRefresh)
+        assertTrue(store.library.value.episode(episode.id)!!.newInLastRefresh)
+        store.unsubscribe(episode.feedId)
+        store.saveFeed("https://example.com/feed", FeedParser.Feed("Feed", emptyList()), episode.feedId)
+        assertTrue(store.library.value.episode(episode.id)!!.newInLastRefresh)
+    }
     @Test fun deletingCustomListKeepsAudioAndClearsFeedDefault() = runBlocking {
         store.createList("My list")
         val list = store.library.value.lists.single { !it.system }
@@ -223,7 +257,7 @@ class LibraryStoreTest {
         val db = helper.writableDatabase
         db.execSQL("CREATE TABLE audit_updates(count INTEGER)")
         db.execSQL("INSERT INTO audit_updates VALUES(0)")
-        db.execSQL("CREATE TRIGGER count_updates AFTER UPDATE ON episodes BEGIN UPDATE audit_updates SET count=count+1; END")
+        db.execSQL("CREATE TRIGGER count_updates AFTER UPDATE OF title,audio_url,description,published ON episodes BEGIN UPDATE audit_updates SET count=count+1; END")
         store.saveFeed("https://example.com/feed", FeedParser.Feed("Feed", listOf(
             FeedParser.Item("guid", "Episode", "https://example.com/audio.mp3", "Info", 100, 10_000))), episode.feedId)
         db.rawQuery("SELECT count FROM audit_updates", null).use { it.moveToFirst(); assertEquals(0, it.getInt(0)) }
@@ -240,6 +274,7 @@ class LibraryStoreTest {
         store.exportLibrary(output)
         val backup = output.toString("UTF-8")
         assertFalse(backup.contains("manager_id")); assertFalse(backup.contains(file.absolutePath))
+        assertFalse(backup.contains("new_in_last_refresh"))
         store.rate(episode.id, 1); store.progress(episode.id, 10, 10000)
         repeat(2) { store.restoreLibrary(backup.byteInputStream()) }
         val after = store.library.value.episode(episode.id)!!

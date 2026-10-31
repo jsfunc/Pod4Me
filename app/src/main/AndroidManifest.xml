@@ -26,6 +26,15 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="pod4me" />
             </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+                <data android:host="${sharingHost}" />
+                <data android:path="${sharingPath}" />
+            </intent-filter>
         </activity>
         <service android:name=".playback.PlaybackService" android:exported="true"
             android:foregroundServiceType="mediaPlayback">

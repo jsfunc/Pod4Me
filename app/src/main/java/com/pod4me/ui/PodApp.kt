@@ -20,6 +20,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -33,6 +34,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -75,6 +77,7 @@ fun PodApp(model: AppModel) {
     var unsubscribingFeed by remember { mutableStateOf<Feed?>(null) }
     var showLists by remember { mutableStateOf(false) }
     var showDiscovery by rememberSaveable { mutableStateOf(false) }
+    var showSharedMessage by rememberSaveable { mutableStateOf(false) }
     var restoreUri by remember { mutableStateOf<android.net.Uri?>(null) }
     val context = LocalContext.current
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { it?.let(model::importFeeds) }
@@ -94,7 +97,8 @@ fun PodApp(model: AppModel) {
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }, actions = {
-                        TextButton(onClick = { model.refresh() }, enabled = !busy && library.subscriptions.isNotEmpty()) { Text("Refresh") }
+                        if (page == "Library") SortSelector(sort) { sort = it }
+                        else TextButton(onClick = { model.refresh() }, enabled = !busy && library.subscriptions.isNotEmpty()) { Text("Refresh") }
                     })
                     if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
@@ -120,6 +124,7 @@ fun PodApp(model: AppModel) {
                         onImport = { importLauncher.launch(arrayOf("text/*", "application/octet-stream")) },
                         onExport = { exportLauncher.launch("pod4me-feeds.txt") },
                         onDiscover = { showDiscovery = true; model.discover() },
+                        onOpenShared = { showSharedMessage = true },
                         onBackup = { backupLauncher.launch("pod4me-library-v1.json") },
                         onRestore = { restoreLauncher.launch(arrayOf("application/json", "text/*", "application/octet-stream")) },
                         onBrowse = { browseFeed = it.id; page = "Latest" }, onEdit = { editingFeed = it },
@@ -143,7 +148,6 @@ fun PodApp(model: AppModel) {
                                 library.feeds.filter { feed -> feed.subscribed || (library.downloadCounts[feed.id] ?: 0) > 0 }
                                     .forEach { feed -> FilterChip(selected = filter == "feed:${feed.id}", onClick = { filter = "feed:${feed.id}" }, label = { Text(feed.name) }) }
                             }
-                            SortSelector(sort) { sort = it }
                         } else {
                             Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text(browseFeed?.let(library::feedName) ?: "Latest episodes", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
@@ -233,6 +237,10 @@ fun PodApp(model: AppModel) {
         if (showLists) ListsDialog(library.lists, model, positions) { showLists = false }
         if (showDiscovery) DiscoveryDialog(library, model, positions, busy) { showDiscovery = false }
         library.episode(selectedId)?.let { ep -> EpisodeDialog(ep, library, model, positions, onDismiss = { selectedId = null }) }
+        if (showSharedMessage) SharedMessageDialog(onDismiss = { showSharedMessage = false }, onOpen = {
+            model.receive(it)
+            showSharedMessage = false
+        })
         suggestion?.let { incoming -> SuggestionDialog(incoming, busy, onDismiss = model::dismissSuggestion) { kind, subscribe -> model.acceptSuggestion(incoming, kind, subscribe) } }
         error?.let { message -> AlertDialog(onDismissRequest = model.app::clearError, title = { Text("Could not complete action") }, text = { Text(message) },
             confirmButton = { TextButton(onClick = model.app::clearError) { Text("OK") } }) }
@@ -243,12 +251,14 @@ fun PodApp(model: AppModel) {
 
 @Composable
 private fun FeedScreen(library: Library, busy: Boolean, positions: ScrollPositions, onAdd: () -> Unit, onImport: () -> Unit, onExport: () -> Unit, onDiscover: () -> Unit,
-    onBackup: () -> Unit, onRestore: () -> Unit, onBrowse: (Feed) -> Unit, onEdit: (Feed) -> Unit, onRefresh: (Feed) -> Unit, onSuggest: (Feed) -> Unit, onUnsubscribe: (Feed) -> Unit) {
+    onOpenShared: () -> Unit, onBackup: () -> Unit, onRestore: () -> Unit, onBrowse: (Feed) -> Unit, onEdit: (Feed) -> Unit, onRefresh: (Feed) -> Unit, onSuggest: (Feed) -> Unit, onUnsubscribe: (Feed) -> Unit) {
+    val context = LocalContext.current
     FlowRow(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Button(onClick = onAdd, enabled = !busy) { Text("Add RSS feed") }
         TextButton(onClick = onImport, enabled = !busy) { Text("Import") }
         TextButton(onClick = onExport) { Text("Export") }
-        TextButton(onClick = onDiscover, enabled = !busy) { Text("New?") }
+        TextButton(onClick = onDiscover, enabled = !busy) { Text("Suggest") }
+        TextButton(onClick = onOpenShared, enabled = !busy) { Text("Open shared message") }
         TextButton(onClick = onBackup, enabled = !busy) { Text("Back up library") }
         TextButton(onClick = onRestore, enabled = !busy) { Text("Restore library") }
     }
@@ -274,7 +284,8 @@ private fun FeedScreen(library: Library, busy: Boolean, positions: ScrollPositio
                             Text("Expiry: ${feed.expiryDays?.let { "$it days" } ?: "never"}", style = MaterialTheme.typography.labelSmall)
                         }
                         if (feed.url.isNotBlank()) {
-                            ActionIcon(R.drawable.ic_share, "Suggest feed", small = true, onClick = { onSuggest(feed) })
+                            ShareMenu("Share feed", small = true, onSuggest = { onSuggest(feed) },
+                                onCopyUrl = { copy(context, "Podcast feed", feed.url) })
                             ActionIcon(R.drawable.ic_delete, "Unsubscribe from feed", small = true, onClick = { onUnsubscribe(feed) })
                         }
                     }
@@ -288,13 +299,14 @@ private fun FeedScreen(library: Library, busy: Boolean, positions: ScrollPositio
 @Composable
 private fun DiscoveryDialog(library: Library, model: AppModel, positions: ScrollPositions, busy: Boolean, onDismiss: () -> Unit) {
     val discovery by model.discovery.collectAsStateWithLifecycle()
+    val memory by model.discoveryMemory.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val subscribed = remember(library.feeds) {
         library.subscriptions.mapNotNull { runCatching { PodcastDiscovery.feedKey(it.url) }.getOrNull() }.toSet()
     }
     AlertDialog(onDismissRequest = onDismiss, title = { Text("New podcasts") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Related searches and popular shows from Apple Podcasts.", style = MaterialTheme.typography.bodySmall)
+            Text("Rate suggestions to get more of what you like. Tap a selected thumb again to clear it.", style = MaterialTheme.typography.bodySmall)
             if (discovery.loading) {
                 LinearProgressIndicator(Modifier.fillMaxWidth())
                 Text("Finding suggestions…")
@@ -317,6 +329,18 @@ private fun DiscoveryDialog(library: Library, model: AppModel, positions: Scroll
                                 TextButton(onClick = { model.action {
                                     context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(item.appleUrl)))
                                 } }) { Text("Apple Podcasts") }
+                                Row {
+                                    val vote = memory.feedback[PodcastDiscovery.feedKey(item.feedUrl)]?.vote ?: 0
+                                    for ((value, icon) in listOf(1 to R.drawable.ic_thumb_up, -1 to R.drawable.ic_thumb_down)) {
+                                        IconToggleButton(checked = vote == value, enabled = !busy,
+                                            onCheckedChange = { model.rateRecommendation(item, value) },
+                                            colors = IconButtonDefaults.iconToggleButtonColors(
+                                                checkedContainerColor = MaterialTheme.colorScheme.primaryContainer)) {
+                                            Icon(painterResource(icon), contentDescription =
+                                                "${if (value == 1) "Thumbs up" else "Thumbs down"}: ${item.title}")
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -324,7 +348,7 @@ private fun DiscoveryDialog(library: Library, model: AppModel, positions: Scroll
             }
         }
     }, confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
-        dismissButton = { TextButton(enabled = !busy, onClick = model::discover) { Text("New suggestions") } })
+        dismissButton = { TextButton(enabled = !busy, onClick = model::discover) { Text("Suggest") } })
 }
 
 @Composable
@@ -336,10 +360,41 @@ private fun ActionIcon(@androidx.annotation.DrawableRes icon: Int, label: String
 }
 
 @Composable
+private fun ShareMenu(label: String, small: Boolean = false, onSuggest: () -> Unit, onCopyUrl: () -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        ActionIcon(R.drawable.ic_share, label, small = small, onClick = { expanded = true })
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(text = { Text("Suggest") }, onClick = { expanded = false; onSuggest() })
+            DropdownMenuItem(text = { Text("Copy URL") }, onClick = { expanded = false; onCopyUrl() })
+        }
+    }
+}
+
+@Composable
+private fun InfoDialogTitle(title: String, closeLabel: String, onDismiss: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        Text(title, modifier = Modifier.weight(1f), maxLines = 3, overflow = TextOverflow.Ellipsis)
+        ActionIcon(R.drawable.ic_close, closeLabel, onClick = onDismiss)
+    }
+}
+
+@Composable
 private fun SortSelector(sort: TrackSort, onChange: (TrackSort) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
-    Box(Modifier.padding(horizontal = 8.dp)) {
-        TextButton(onClick = { expanded = true }) { Text("Sort: ${sort.label} ▾") }
+    val shortLabel = when (sort) {
+        TrackSort.PUBLICATION -> "Pub date"
+        TrackSort.DOWNLOAD -> "DL date"
+        TrackSort.STARS -> "Stars"
+        TrackSort.FEED -> "Feed"
+        TrackSort.PROGRESS -> "Played"
+    }
+    Box {
+        TextButton(onClick = { expanded = true }, contentPadding = PaddingValues(horizontal = 8.dp),
+            modifier = Modifier.widthIn(max = 96.dp).semantics { contentDescription = "Sort by ${sort.label}" }) {
+            Text(shortLabel, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            Text(" ▾", maxLines = 1)
+        }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             TrackSort.entries.forEach { option -> DropdownMenuItem(text = { Text(option.label) }, onClick = { onChange(option); expanded = false }) }
         }
@@ -398,7 +453,13 @@ private fun EpisodeCard(ep: Episode, feed: String, current: Boolean, onDetails: 
 @Composable
 private fun CompactEpisodeCard(ep: Episode, feed: String, current: Boolean, artworkUrl: String?,
     onDetails: () -> Unit, onPlay: () -> Unit, onDownload: () -> Unit, onCancel: () -> Unit, onQueue: () -> Unit) {
-    OutlinedCard(Modifier.fillMaxWidth()) {
+    val colors = MaterialTheme.colorScheme
+    val background = if (ep.newInLastRefresh) {
+        if (isSystemInDarkTheme()) colors.surfaceContainerHigh else colors.surfaceContainerLowest
+    } else colors.surface
+    OutlinedCard(Modifier.fillMaxWidth().semantics {
+        if (ep.newInLastRefresh) stateDescription = "New in the latest feed refresh"
+    }, colors = CardDefaults.outlinedCardColors(containerColor = background)) {
         ArtworkRow(artworkUrl, Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f).clickable(onClick = onDetails).padding(vertical = 4.dp)) {
@@ -557,13 +618,22 @@ private fun EpisodeDialog(ep: Episode, library: Library, model: AppModel, positi
     val info by produceState<String?>(null, ep.id, library.catalogueRevision) {
         value = withContext(Dispatchers.IO) { Html.fromHtml(model.store.description(ep.id), Html.FROM_HTML_MODE_COMPACT).toString().trim() }
     }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text(ep.title, maxLines = 3, overflow = TextOverflow.Ellipsis) },
+    AlertDialog(onDismissRequest = onDismiss, title = {
+        InfoDialogTitle(ep.title, "Close episode info", onDismiss)
+    },
         text = {
             Column(Modifier.heightIn(max = 520.dp).verticalScroll(
                 if (info == null) rememberScrollState() else positions.scroll("info:${ep.id}")), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(library.feedName(ep.feedId))
-                Text("Published: ${date(ep.published)}", style = MaterialTheme.typography.bodySmall)
-                ep.downloaded?.let { Text("Downloaded: ${date(it)}", style = MaterialTheme.typography.bodySmall) }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Published: ${date(ep.published)}", style = MaterialTheme.typography.bodySmall)
+                        ep.downloaded?.let { Text("Downloaded: ${date(it)}", style = MaterialTheme.typography.bodySmall) }
+                    }
+                    ShareMenu("Share episode",
+                        onSuggest = { share(context, Suggestions.episode(ep, library.feeds.find { it.id == ep.feedId })) },
+                        onCopyUrl = { copy(context, "Episode audio", ep.audioUrl) })
+                }
                 Text(if (ep.protected) "Protected by 4ever" else ep.expiry?.let { "Expires: ${date(it)}" } ?: "No expiry", style = MaterialTheme.typography.bodySmall)
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -581,26 +651,41 @@ private fun EpisodeDialog(ep: Episode, library: Library, model: AppModel, positi
                         })
                 }
                 if (ep.isDownloaded) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.weight(1.2f).heightIn(min = 48.dp).toggleable(value = ep.heard, role = Role.Switch,
+                            onValueChange = { heard -> model.action {
+                                if (heard) model.store.membership(ep.id, "heard", true)
+                                else model.player.markUnheard(ep.id)
+                            } }).semantics {
+                                contentDescription = "Heard status"
+                                stateDescription = if (ep.heard) "Heard" else "Unheard"
+                            }, verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Switch(checked = ep.heard, onCheckedChange = null)
+                            Text(if (ep.heard) "Heard" else "Unheard", modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Row(Modifier.weight(1f).heightIn(min = 48.dp).toggleable(value = ep.protected, role = Role.Checkbox,
+                            onValueChange = { included -> model.action { model.store.membership(ep.id, "4ever", included) } }),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = ep.protected, onCheckedChange = null)
+                            Text("4ever", maxLines = 1)
+                        }
+                    }
+                    Text("Marking unheard resets the saved position.", style = MaterialTheme.typography.bodySmall)
                     Text("Lists", fontWeight = FontWeight.Bold)
                     Text("Feed: ${library.feedName(ep.feedId)} (automatic)", style = MaterialTheme.typography.bodySmall)
-                    library.lists.forEach { list ->
-                        val checked = when (list.id) { "unheard" -> !ep.heard; "heard" -> ep.heard; else -> list.id in ep.lists }
+                    library.lists.filter { it.id !in setOf("unheard", "heard", "4ever") }.forEach { list ->
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(checked = checked, onCheckedChange = { included -> model.action {
-                                if ((list.id == "unheard" && included) || (list.id == "heard" && !included)) model.player.markUnheard(ep.id)
-                                else model.store.membership(ep.id, list.id, included)
-                            } })
+                            Checkbox(checked = list.id in ep.lists,
+                                onCheckedChange = { included -> model.action { model.store.membership(ep.id, list.id, included) } })
                             Text(list.name)
                         }
                     }
-                    Text("Unchecking Unheard marks the episode heard. Marking it unheard resets its saved position.", style = MaterialTheme.typography.bodySmall)
-                }
-                FlowRow {
-                    TextButton(onClick = { copy(context, "Episode audio", ep.audioUrl) }) { Text("Share (copy audio URL)") }
-                    TextButton(onClick = { share(context, Suggestions.episode(ep, library.feeds.find { it.id == ep.feedId })) }) { Text("Suggest to someone") }
-                    TextButton(enabled = info != null, onClick = { copy(context, "Episode info", "${ep.title}\n\n${info.orEmpty()}") }) { Text("Copy info") }
                 }
                 SelectionContainer { Text(info?.ifBlank { "No episode information provided." } ?: "Loading episode information…") }
+                TextButton(enabled = info != null, onClick = { copy(context, "Episode info", "${ep.title}\n\n${info.orEmpty()}") }) { Text("Copy info") }
                 val bookmarks = library.bookmarks.filter { it.episodeId == ep.id }
                 if (bookmarks.isNotEmpty()) {
                     Text("Bookmarks", fontWeight = FontWeight.Bold)
@@ -620,7 +705,7 @@ private fun EpisodeDialog(ep: Episode, library: Library, model: AppModel, positi
                     else if (playback.id == ep.id) Text("Stop playback before deleting this episode.", style = MaterialTheme.typography.bodySmall)
                 }
             }
-        }, confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } })
+        }, confirmButton = {})
     if (confirmDelete) DeleteAudioDialog(enabled = ep.isDownloaded && !ep.protected && playback.id != ep.id,
         onDismiss = { confirmDelete = false },
         onDelete = { model.action { model.store.deleteAudio(ep.id); onDismiss() }; confirmDelete = false })
@@ -636,30 +721,57 @@ private fun DeleteAudioDialog(enabled: Boolean, onDismiss: () -> Unit, onDelete:
 
 @Composable
 private fun FeedEditDialog(feed: Feed, lists: List<TrackList>, positions: ScrollPositions, onDismiss: () -> Unit, onSave: (String, Int?, Set<String>) -> Unit) {
+    val context = LocalContext.current
     var name by remember(feed.id) { mutableStateOf(feed.name) }
     var forever by remember(feed.id) { mutableStateOf(feed.expiryDays == null) }
     var days by remember(feed.id) { mutableStateOf((feed.expiryDays ?: 30).toString()) }
     var defaults by remember(feed.id) { mutableStateOf(feed.defaults) }
     val validDays = days.toIntOrNull()?.let { it in 1..36500 } == true
     val valid = name.isNotBlank() && (forever || validDays)
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Feed settings") }, text = {
-        Column(Modifier.verticalScroll(positions.scroll("feed-settings:${feed.id}")), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Feed name") }, singleLine = true)
-            Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(checked = forever, onCheckedChange = { forever = it }); Text("Never expire new downloads") }
-            if (!forever) OutlinedTextField(value = days, onValueChange = { days = it }, label = { Text("Expiry in days (1–36500)") }, singleLine = true, isError = !validDays)
+    AlertDialog(onDismissRequest = onDismiss, title = {
+        InfoDialogTitle(feed.name, "Close feed settings", onDismiss)
+    }, text = {
+        Column(Modifier.heightIn(max = 520.dp).verticalScroll(positions.scroll("feed-settings:${feed.id}")), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (feed.url.isNotBlank()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Feed URL", style = MaterialTheme.typography.labelSmall)
+                    SelectionContainer { Text(feed.url, style = MaterialTheme.typography.bodySmall,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis) }
+                }
+                ShareMenu("Share feed", onSuggest = { share(context, Suggestions.feed(feed)) },
+                    onCopyUrl = { copy(context, "Podcast feed", feed.url) })
+            }
+            OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Feed name") },
+                modifier = Modifier.fillMaxWidth(), singleLine = true)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.weight(1.2f).heightIn(min = 48.dp).toggleable(value = forever, role = Role.Switch,
+                    onValueChange = { forever = it }), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Switch(checked = forever, onCheckedChange = null)
+                    Text("No expiry", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Row(Modifier.weight(1f).heightIn(min = 48.dp).toggleable(value = "4ever" in defaults, role = Role.Checkbox,
+                    onValueChange = { defaults = if (it) defaults + "4ever" else defaults - "4ever" }),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = "4ever" in defaults, onCheckedChange = null)
+                    Text("4ever", maxLines = 1)
+                }
+            }
+            if (!forever) OutlinedTextField(value = days, onValueChange = { days = it }, label = { Text("Expiry in days (1–36500)") },
+                modifier = Modifier.fillMaxWidth(), singleLine = true, isError = !validDays)
             Text("Applies to future downloads. Heard episodes expire within seven days; 4ever protects them.", style = MaterialTheme.typography.bodySmall)
             Text("Default lists", fontWeight = FontWeight.Bold)
             Text("New episodes automatically appear in Unheard and this feed’s view.", style = MaterialTheme.typography.bodySmall)
-            lists.filter { it.id != "heard" && it.id != "unheard" }.forEach { list ->
+            lists.filter { it.id !in setOf("heard", "unheard", "4ever") }.forEach { list ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = list.id in defaults, onCheckedChange = { defaults = if (it) defaults + list.id else defaults - list.id })
                     Text(list.name)
                 }
             }
-            if (feed.url.isNotBlank()) SelectionContainer { Text(feed.url, style = MaterialTheme.typography.bodySmall) }
         }
-    }, confirmButton = { TextButton(onClick = { onSave(name, if (forever) null else days.toInt(), defaults) }, enabled = valid) { Text("Save") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+    }, confirmButton = { TextButton(onClick = { onSave(name, if (forever) null else days.toInt(), defaults) }, enabled = valid) { Text("Save") } })
 }
 
 @Composable
@@ -685,6 +797,34 @@ private fun ListsDialog(lists: List<TrackList>, model: AppModel, positions: Scro
     deleting?.let { list -> AlertDialog(onDismissRequest = { deleting = null }, title = { Text("Delete ${list.name}?") }, text = { Text("The downloaded episodes will be kept.") },
         confirmButton = { TextButton(onClick = { model.action { model.store.deleteList(list.id); deleting = null } }) { Text("Delete list") } },
         dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel") } }) }
+}
+
+@Composable
+private fun SharedMessageDialog(onDismiss: () -> Unit, onOpen: (String) -> Unit) {
+    var text by rememberSaveable { mutableStateOf("") }
+    var error by rememberSaveable { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    fun update(value: String) {
+        if (value.length > 64_000) error = "This message is too long. Copy just one podcast or episode suggestion."
+        else { text = value; error = null }
+    }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Open shared message") }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Copy the whole message from WhatsApp or another app, then paste it here. You can also paste an RSS feed or direct audio link.",
+                style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = {
+                val clip = context.getSystemService(ClipboardManager::class.java).primaryClip
+                val value = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()
+                if (value.isNullOrBlank()) error = "No text to paste. Copy a message first." else update(value)
+            }) { Text("Paste") }
+            OutlinedTextField(value = text, onValueChange = ::update, label = { Text("Message or link") },
+                modifier = Modifier.fillMaxWidth(), minLines = 3, maxLines = 6, isError = error != null)
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        }
+    }, confirmButton = { TextButton(enabled = text.isNotBlank(), onClick = {
+        try { Suggestions.parse(text); onOpen(text) }
+        catch (e: IllegalArgumentException) { error = e.message ?: "This message does not contain a supported link." }
+    }) { Text("Open") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @Composable

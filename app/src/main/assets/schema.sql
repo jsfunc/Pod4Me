@@ -4,7 +4,7 @@ INSERT INTO lists VALUES('unheard','Unheard',1);
 INSERT INTO lists VALUES('heard','Heard',1);
 INSERT INTO lists VALUES('4ever','4ever',1);
 CREATE TABLE feed_defaults(feed_id TEXT NOT NULL REFERENCES feeds(id) ON DELETE CASCADE, list_id TEXT NOT NULL REFERENCES lists(id) ON DELETE CASCADE, PRIMARY KEY(feed_id,list_id));
-CREATE TABLE episodes(id TEXT PRIMARY KEY, feed_id TEXT NOT NULL REFERENCES feeds(id), guid TEXT NOT NULL, title TEXT NOT NULL, audio_url TEXT NOT NULL, description TEXT NOT NULL, published INTEGER NOT NULL, duration INTEGER NOT NULL DEFAULT 0, downloaded INTEGER, path TEXT, expiry INTEGER, stars INTEGER NOT NULL DEFAULT 0 CHECK(stars BETWEEN 0 AND 5), position INTEGER NOT NULL DEFAULT 0, heard INTEGER NOT NULL DEFAULT 0, download_id INTEGER, manager_id INTEGER, error TEXT, UNIQUE(feed_id,guid));
+CREATE TABLE episodes(id TEXT PRIMARY KEY, feed_id TEXT NOT NULL REFERENCES feeds(id), guid TEXT NOT NULL, title TEXT NOT NULL, audio_url TEXT NOT NULL, description TEXT NOT NULL, published INTEGER NOT NULL, duration INTEGER NOT NULL DEFAULT 0, downloaded INTEGER, path TEXT, expiry INTEGER, stars INTEGER NOT NULL DEFAULT 0 CHECK(stars BETWEEN 0 AND 5), position INTEGER NOT NULL DEFAULT 0, heard INTEGER NOT NULL DEFAULT 0, download_id INTEGER, manager_id INTEGER, new_in_last_refresh INTEGER NOT NULL DEFAULT 0 CHECK(new_in_last_refresh IN (0,1)), error TEXT, UNIQUE(feed_id,guid));
 CREATE INDEX episodes_feed ON episodes(feed_id);
 CREATE INDEX episodes_downloads ON episodes(download_id);
 CREATE TABLE memberships(episode_id TEXT NOT NULL REFERENCES episodes(id) ON DELETE CASCADE, list_id TEXT NOT NULL REFERENCES lists(id) ON DELETE CASCADE, PRIMARY KEY(episode_id,list_id));

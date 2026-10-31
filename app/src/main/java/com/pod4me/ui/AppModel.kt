@@ -38,7 +38,7 @@ class AppModel(application: Application) : AndroidViewModel(application) {
     private val mutableSuggestion = MutableStateFlow<Suggestion?>(null)
     val suggestion = mutableSuggestion.asStateFlow()
     private val discoveryClient = PodcastDiscoveryClient()
-    private val recentlySuggested = linkedSetOf<String>()
+    val discoveryMemory = app.discoveryPreferences.state
     private val mutableDiscovery = MutableStateFlow(DiscoveryUi())
     val discovery = mutableDiscovery.asStateFlow()
 
@@ -77,17 +77,20 @@ class AppModel(application: Application) : AndroidViewModel(application) {
         val generation = mutableDiscovery.value.generation + 1
         mutableDiscovery.value = DiscoveryUi(generation, loading = true)
         try {
-            val result = discoveryClient.discover(library.value, recentlySuggested.toSet())
-            result.items.forEach { recentlySuggested += PodcastDiscovery.feedKey(it.feedUrl) }
-            while (recentlySuggested.size > 100) recentlySuggested.remove(recentlySuggested.first())
+            val result = discoveryClient.discover(library.value, app.discoveryPreferences.read())
+            app.discoveryPreferences.rememberShown(result.items)
             mutableDiscovery.value = DiscoveryUi(generation, items = result.items,
-                message = if (result.partial) "Some directory requests failed; showing the suggestions available." else null)
+                message = if (result.partial) "Some directory requests failed; showing the fresh suggestions available."
+                    else if (result.items.size < 10) "Only ${result.items.size} different suggestions available this time." else null)
         } catch (e: CancellationException) {
-            mutableDiscovery.value = DiscoveryUi(generation, message = "Search interrupted. Tap New suggestions to try again.")
+            mutableDiscovery.value = DiscoveryUi(generation, message = "Search interrupted. Tap Suggest to try again.")
             throw e
         } catch (e: Exception) {
             mutableDiscovery.value = DiscoveryUi(generation, message = e.message ?: "Could not load suggestions.")
         }
+    }
+    fun rateRecommendation(item: PodcastRecommendation, vote: Int) = action {
+        app.discoveryPreferences.rate(item, vote)
     }
     private suspend fun subscribeNow(url: String): String {
         val normalized = FeedParser.httpUrl(url.trim())

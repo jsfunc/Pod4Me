@@ -7,6 +7,7 @@ data class Episode(
     val downloaded: Long? = null, val path: String? = null, val expiry: Long? = null,
     val stars: Int = 0, val position: Long = 0, val heard: Boolean = false,
     val downloadId: Long? = null, val error: String? = null, val lists: Set<String> = emptySet(), val managerId: Long? = null,
+    val newInLastRefresh: Boolean = false,
 ) {
     val isDownloaded get() = path != null
     val progress get() = if (duration > 0) (position.toDouble() / duration).coerceIn(0.0, 1.0) else 0.0

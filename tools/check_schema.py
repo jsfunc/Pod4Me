@@ -67,6 +67,17 @@ class SchemaTests(unittest.TestCase):
         for path in (ROOT / "app/src/main").rglob("*.xml"):
             ET.parse(path)
 
+    def test_refresh_marker_migration_preserves_library_and_defaults_to_old(self):
+        with sqlite3.connect(":memory:") as old:
+            old.executescript((ROOT / "app/src/main/assets/schema.sql").read_text().replace(
+                ", new_in_last_refresh INTEGER NOT NULL DEFAULT 0 CHECK(new_in_last_refresh IN (0,1))", ""))
+            old.execute("INSERT INTO feeds(id,url,name) VALUES('f','https://example.com','Feed')")
+            old.execute("INSERT INTO episodes(id,feed_id,guid,title,audio_url,description,published,path,manager_id,stars,position) VALUES('e','f','g','Episode','https://example.com/a.mp3','Notes',1,'/audio',12,5,9500)")
+            old.executescript((ROOT / "app/src/main/assets/migration_4_5.sql").read_text())
+            self.assertEqual(('/audio', 12, 5, 9500, 0), old.execute("SELECT path,manager_id,stars,position,new_in_last_refresh FROM episodes").fetchone())
+            with self.assertRaises(sqlite3.IntegrityError):
+                old.execute("UPDATE episodes SET new_in_last_refresh=2")
+
     def test_artwork_migration_preserves_existing_library(self):
         with sqlite3.connect(":memory:") as old:
             old.execute("PRAGMA foreign_keys=ON")

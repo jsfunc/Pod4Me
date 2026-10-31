@@ -1,6 +1,6 @@
 # Pod4Me verification
 
-Current source version: 1.0.5, code 13. Database version: 4. Audit baseline: `audit.txt`. Earlier sections below preserve historical 1.0.0 evidence; later sections record the orange theme and duration-label releases.
+Current source version: 1.0.11, code 19. Database version: 5. Audit baseline: `audit.txt`. Earlier sections below preserve historical 1.0.0 evidence; later sections record the orange theme and duration-label releases.
 
 ## Audit disposition
 
@@ -128,3 +128,81 @@ Queue now has Play queue and per-downloaded-item Play, and an empty Player offer
 Final canonical build passed in **43s**: **96 core checks, 10 schema/XML checks and all 58 unit tests**, zero failures/errors/skips. Release lint **zero errors / 23 warnings** (the additional warning is a String.toUri KTX suggestion in the new Apple-link button); final lint report generation reused the unchanged report. Release assembly and device-test compilation passed. `git diff --check` passed. No phone tests were run.
 
 Delivered files: `dist/Pod4Me.apk` and identical `dist/Pod4Me-1.0.5.apk`, **28,961,471 bytes**, SHA-256 `4635de2e90c07a6b7599a9e87017ac3b80a2095436fd18202c6f5285f9aa39f0`. Independently verified `com.pod4me`, version **1.0.5/code 13**, non-debuggable status and valid signature. Certificate SHA-256 `6585371f3a4d176f2c50c706f3c0efa099aeca152ffcc3431876c698babe2ada` matches the delivered 1.0.2–1.0.4 releases and supports updating those installs without uninstalling. Log: `/tmp/pod4me-discovery-playback-build.log`. Real-device acceptance for scroll restoration, Apple discovery, queue/audio recovery and Bluetooth/system resumption remains pending.
+
+
+## Latest-refresh episode highlights and download checks (2026-10-31, 1.0.6/code 14)
+
+Newly discovered episode identities receive a locally persisted flag, replaced atomically on each successful refresh of that feed. Edited existing metadata is not new; failed fetches and unsubscribe races retain previous markers. Latest/feed Browse/search cards use a lighter background (white in light mode, `surfaceContainerHigh` in dark mode), with TalkBack state text. Library/Queue styling is unchanged. Existing episodes start unhighlighted after the explicit schema 4→5 migration; portable backups remain format 1 and exclude the local flag. Foreground pending-download reconciliation now runs every 10 seconds, as requested; completion broadcasts and launch reconciliation remain in place.
+
+Regression coverage includes initial subscription, new backdated episodes, duplicate GUIDs, edits of older episodes, progress updates, process reopening, successful refresh without additions, retained history, per-feed independence, failed refresh and unsubscribe races. Upgrade tests cover schema versions 1–4 to 5 and preserve personal data. The unchanged-metadata trigger test now watches only metadata columns so clearing a refresh marker does not incorrectly count as rewriting notes.
+
+The current environment differs from the previous release notes: Java 17 lacks its compiler; Android Studio JBR is present. The existing local APK and personal key use certificate `134a95237bf3ac990be2f7d1f33fdc7e9e6d16682401d3445cd9ad6fc10ff03f`, which must be preserved. This is not the other workspace’s 1.0.5 `6585…` certificate. No phone certificate or installation was verified and no uninstall was requested.
+
+Library/Downloads now replaces header Refresh with the sort dropdown and removes its former dedicated row. Selected labels are shortened to fit a maximum 96 dp control without a “Sort:” prefix; open-menu labels and accessibility use full sort names. Existing sorting/filter/scroll-state behavior is reused. Other tabs retain Refresh. Device check 37 covers actual S24 fit and usability.
+
+Final canonical build including all three requested changes passed in **1m 52s** using `JAVA_HOME=/home/aurelien/android-studio/jbr ./tools/build-apk.sh`. Log: `/tmp/pod4me-new-episodes-build.log`.
+
+- **Compilation:** release assembled; Android device-test APK compiled (not executed).
+- **Automated tests:** 96 core checks, 11 schema/XML checks, 61 unit tests, zero failures/errors/skips.
+- **Lint:** 0 errors, 23 warnings. Shell syntax and `git diff --check` passed.
+- **Artifact:** `dist/Pod4Me.apk` and identical `dist/Pod4Me-1.0.6.apk`, 28,978,097 bytes, SHA-256 `eca9fd42367280a5cb4a7ba57d21689757de762f3453f693714de97a6cbe64a3`. Independently verified version 1.0.6/code 14, non-debuggable, valid signature, and certificate `134a…` matching this workspace’s pre-existing APK.
+- **Phone testing:** none; checks 35–37 cover visual highlighting, polling and header fit. The installed phone certificate remains unknown.
+
+
+## Suggest feedback and fresh batches (2026-10-31, 1.0.7/code 15)
+
+Suggest replaces New?; each recommendation has toggleable thumbs-up/down controls. Local persisted votes influence title/topic/publisher ranking and query topics. The last nonempty batch is strictly excluded, including after restarting; older suggestions can return, with a bounded 100-item recent-history penalty. Limited/error results never silently reuse the preceding batch. Shared preferences serialize disk writes off the UI thread and retain votes/history across app updates; these preferences are separate from episode stars and portable backups. Schema remains 5 and backup format remains 1.
+
+Regressions cover strict exclusion under candidate scarcity and URL aliases, later return, generalized topic/publisher feedback, negative direct votes without permanent bans, feedback queries without subscriptions, genre parsing, persistent rating/history reload, vote switching/clearing, concurrent writes, an immediate read following a vote, and bounded history without discarding ratings. Social features are being discussed separately and are not implemented in this release.
+
+Final canonical release passed in **1m 18s** with `JAVA_HOME=/home/aurelien/android-studio/jbr ./tools/build-apk.sh`; log `/tmp/pod4me-feedback-build.log`.
+
+- **Compilation:** release APK assembled and Android device-test APK compiled; device tests not executed.
+- **Tests:** 96 core checks, 11 schema/XML checks, **69 unit tests**, no failures/errors/skips.
+- **Lint:** 0 errors / 24 warnings (the new preferences editor adds one KTX suggestion). Shell syntax and `git diff --check` passed.
+- **APK:** `dist/Pod4Me.apk` and identical `dist/Pod4Me-1.0.7.apk`, version 1.0.7/code 15, 28,995,785 bytes, SHA-256 `48d90816dda629551e3e06036e976cf746ec1dc1647b14512c27e52b4010b7e3`. Signature valid, non-debuggable, certificate `134a95237bf3ac990be2f7d1f33fdc7e9e6d16682401d3445cd9ad6fc10ff03f` matches this workspace’s prior 1.0.6.
+- **Phone:** no tests performed; user plans to install/check. Discovery relevance and device check 38 remain pending. Social/WhatsApp changes remain discussion only.
+
+
+## No-hosting sharing trial (2026-10-31, 1.0.8/code 16)
+
+The user accepted a limited-audience trial using existing messaging apps and no Pod4Me hosting. Feeds now offers Open shared message with explicit Paste, bounded multiline input and local errors; it routes through the existing confirmation before subscribing/downloading. Shared messages include recipient instructions and feed titles. Legacy links are accepted. Regressions cover whole-message copying with a personal note/instructions, reserved characters, and legacy untitled feed links. No database, backup, accounts or hosted-service change. WhatsApp menus and two-phone convenience remain device check 39.
+
+Final canonical build passed in **1m 34s**; log `/tmp/pod4me-sharing-build.log`.
+
+- **Compilation:** release APK assembled and Android device-test APK compiled (device tests not executed).
+- **Tests:** 96 core checks, 11 schema/XML checks and **71 unit tests**, zero failures/errors/skips.
+- **Lint:** 0 errors / 24 warnings. Shell syntax and `git diff --check` passed.
+- **Artifact:** `dist/Pod4Me.apk` and identical `dist/Pod4Me-1.0.8.apk`, version 1.0.8/code 16, 29,012,169 bytes, SHA-256 `5e26992cb9a9d50130b3272d0321ae8d995345d1e070f3cb99ee099cfc5872e1`. Independently checked valid signature, non-debuggable status and certificate `134a95237bf3ac990be2f7d1f33fdc7e9e6d16682401d3445cd9ad6fc10ff03f`, matching this workspace’s 1.0.7.
+- **Phone:** no testing performed. Actual WhatsApp menu availability, paste usability and two-phone delivery remain pending; the user will report trial results.
+
+
+## Shorter shared messages (2026-10-31, 1.0.9/code 17)
+
+After user feedback about the duplicated Radio France URL, outgoing messages now contain only a readable title and a single existing-format Pod4Me link. The link preserves URL/title/source feed information. Removed the standalone URL and instruction paragraph; parsing and confirmation are unchanged. Existing round-trip, reserved-character, personal-note and legacy-link tests cover the payload. No schema/backup change. The user reported copy/paste into Pod4Me because direct WhatsApp transfer was unavailable; the shorter format and download completion still need phone validation (check 40).
+
+Canonical build passed in **1m 19s**, log `/tmp/pod4me-sharing-build.log` (reused). Release and device-test APKs compiled; **96 core checks, 11 schema/XML checks, 71 unit tests** passed with no failures/errors/skips. Lint: **0 errors / 24 warnings**. Shell syntax and diff whitespace checks passed.
+
+Independently verified `dist/Pod4Me.apk` and `dist/Pod4Me-1.0.9.apk`: version 1.0.9/code 17, non-debuggable, valid signature with the unchanged `134a…` certificate, 29,012,169 bytes each, identical SHA-256 `221c46348def8ea4cfb5282936d85803dbb166152a240ee160f55956413bd184`. No phone execution of the new format; only the user’s earlier outgoing-message and copy/paste report is recorded.
+
+
+## HTTPS recommendations (2026-10-31, 1.0.10/code 18)
+
+The user deployed the static website at `https://pod4me.aurelien-garivier.workers.dev/`. Outgoing messages now contain a readable title and one HTTPS link. Fragment data carries the recommendation type, source URL, title and optional feed, without sending that metadata to the static HTTP server. Android App Links uses the same hostname from `sharing.properties`; the browser page provides an explicit Open in Pod4Me intent link. Legacy custom links and raw feed/audio URLs remain supported. Incoming content still opens the existing confirmation; no automatic download or subscription. No schema/backup change.
+
+Final canonical build passed in **1m 3s** using Android Studio JBR: **96 core checks, 11 schema/XML checks, 80 unit tests (zero failures/errors/skips)**, release assembly and device-test compilation. Lint: **0 errors / 24 existing warnings**. New regressions cover HTTPS output, metadata round-trip and link priority, foreign website fragments, missing payload, unsafe URLs/source feeds, duplicate fields, unknown types and legacy browser-fallback metadata. Website Node payload checks, JS syntax and `git diff --check` passed. The initial Gradle import issue and added manifest lint warning were fixed before final delivery.
+
+Artifacts: `dist/Pod4Me.apk` and `dist/Pod4Me-1.0.10.apk`, **29,012,349 bytes**, identical SHA-256 `7ce98239054868e65df0929738e83aaf4c736574465737e0e4e0c131648d5b8a`. Release script verified version/non-debuggable/signature and preserved the existing certificate. Packaging the website independently verified that the APK certificate matches the live association JSON. Log: `/tmp/pod4me-sharing-build.log`.
+
+Server checks: landing HTML and `link.js` match the uploaded bundle; `/.well-known/assetlinks.json` returns HTTP 200 without redirects, application/json, package `com.pod4me`, certificate `134a95237bf3ac990be2f7d1f33fdc7e9e6d16682401d3445cd9ad6fc10ff03f`. No repeat website upload is needed. The ENS APK URL returned 404 and awaits user upload of the new APK. No phone tests or Android link-verification results are claimed; device check 41 is pending.
+
+
+## Track and feed Info / Share redesign (2026-10-31, 1.0.11/code 19)
+
+Track Info replaces the separate Heard/Unheard/4ever system-list rows with a Heard/Unheard switch and 4ever checkbox on one row. Marking Unheard retains the playback-service reset/stale-progress protection; other membership operations retain store behavior. Dates have Share on their right with Suggest and Copy URL. Copy info moves below the description; a top-right close icon replaces Done. Selectable lazy-loaded notes, scroll restoration, rating, custom lists, expiry, bookmarks and protected/current deletion remain.
+
+Feed cards and feed settings use the same two-option Share menu: Suggest sends the existing typed HTTPS feed link; Copy URL copies the exact RSS URL. The recipient can Subscribe from the existing confirmation after opening Pod4Me; browser fallback may first require Open in Pod4Me. Feed settings uses the same feed-name/close header and URL/Share row, with No expiry beside default 4ever. Save commits edits; ×/Back/outside dismissal discard them. Default custom lists and validation remain. No schema, sharing protocol, backup or hosting change.
+
+Final canonical build passed in **1m 27s** using Android Studio JBR: **96 core checks, 11 schema/XML checks, 80 unit tests**, zero failures/errors/skips. Release lint **0 errors / 24 existing warnings**. Release assembly and device-test compilation passed; `git diff --check` passed. Existing store/playback regressions cover heard thresholds, reset/stale progress and deletion protection; no new tests that merely mirror the UI layout were added. This does not verify actual device rendering.
+
+Artifacts: `dist/Pod4Me.apk` and identical `dist/Pod4Me-1.0.11.apk`, **29,045,117 bytes**, SHA-256 `c3fd538230cee20d655743e4aed3d90b5b524c462bc17264daad1376289bd299`. Release script checked version/non-debuggable/signature and certificate equality with the prior local release. Log: `/tmp/pod4me-info-build.log`. No phone tests were performed; device checks 43–44 are pending. ENS still serves the previously verified 1.0.10 until the user uploads this new APK; no website re-upload is required.

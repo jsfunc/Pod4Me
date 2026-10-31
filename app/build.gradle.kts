@@ -1,8 +1,17 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+val sharing = Properties().apply {
+    rootProject.file("sharing.properties").inputStream().use { load(it) }
+}
+val sharingHost = sharing.getProperty("host")
+val sharingPath = sharing.getProperty("path")
+require(sharingHost.matches(Regex("[a-z0-9]+(?:[.-][a-z0-9]+)*"))) { "Invalid sharing host" }
+require(sharingPath.matches(Regex("/(?:[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*/)*"))) { "Invalid sharing path" }
 android {
     namespace = "com.pod4me"
     compileSdk = 36
@@ -10,8 +19,11 @@ android {
         applicationId = "com.pod4me"
         minSdk = 34
         targetSdk = 36
-        versionCode = 13
-        versionName = "1.0.5"
+        versionCode = 19
+        versionName = "1.0.11"
+        buildConfigField("String", "SHARE_BASE_URL", "\"https://$sharingHost$sharingPath\"")
+        manifestPlaceholders["sharingHost"] = sharingHost
+        manifestPlaceholders["sharingPath"] = sharingPath
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { compose = true; buildConfig = true }

@@ -21,7 +21,7 @@ class PodcastDiscoveryClient {
     private val cache = linkedMapOf<String, Cached>()
     private var lastRequest = -3100L
 
-    suspend fun discover(library: Library, recent: Set<String>): DiscoveryResult = withContext(Dispatchers.IO) {
+    suspend fun discover(library: Library, memory: DiscoveryMemory): DiscoveryResult = withContext(Dispatchers.IO) {
         val country = Locale.getDefault().country.lowercase(Locale.ROOT).takeIf { it.matches(Regex("[a-z]{2}")) } ?: "us"
         val related = mutableListOf<PodcastRecommendation>()
         val popular = mutableListOf<PodcastRecommendation>()
@@ -29,7 +29,7 @@ class PodcastDiscoveryClient {
         suspend fun attempt(block: suspend () -> Unit) {
             try { block() } catch (e: CancellationException) { throw e } catch (_: Exception) { failed = true }
         }
-        for (query in PodcastDiscovery.queries(library)) attempt {
+        for (query in PodcastDiscovery.queries(library, feedback = memory.feedback)) attempt {
             val url = "https://itunes.apple.com/search".toHttpUrl().newBuilder()
                 .addQueryParameter("term", query.term).addQueryParameter("entity", "podcast")
                 .addQueryParameter("country", country).addQueryParameter("limit", "30").build().toString()
@@ -56,9 +56,10 @@ class PodcastDiscoveryClient {
                 }
             }
         }
-        val items = PodcastDiscovery.select(related, popular, library.subscriptions, recent)
-        check(items.isNotEmpty()) { if (failed) "Could not load podcast suggestions. Check your connection and try New? again."
-            else "No new podcasts found for these searches. Try New? again for another selection." }
+        val items = PodcastDiscovery.select(related, popular, library.subscriptions, memory.recent.toSet(),
+            previous = memory.lastShown, feedback = memory.feedback)
+        check(items.isNotEmpty()) { if (failed) "Could not find fresh suggestions. Check your connection and tap Suggest again."
+            else "No different suggestions available for these searches right now. Try Suggest later; the previous batch will not be repeated." }
         DiscoveryResult(items, failed)
     }
 
@@ -96,7 +97,10 @@ class PodcastDiscoveryClient {
             require(host == "podcasts.apple.com" || host == "itunes.apple.com")
             val title = row.getString("collectionName").trim().take(512)
             require(title.isNotEmpty())
-            PodcastRecommendation(title, row.optString("artistName").take(512), feed, apple, reason)
+            val genres = row.optJSONArray("genres")
+            val topics = if (genres == null) emptyList() else (0 until minOf(genres.length(), 8))
+                .map { genres.optString(it).trim().take(100) }.filter { it.isNotEmpty() && !it.equals("Podcasts", ignoreCase = true) }.distinct()
+            PodcastRecommendation(title, row.optString("artistName").take(512), feed, apple, reason, topics = topics)
         }.getOrNull()
     }
 }
