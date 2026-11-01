@@ -306,6 +306,28 @@ class LibraryStoreTest {
         println("10,001 episodes, 20 MB notes: progress save " + (System.nanoTime() - started) / 1_000_000 + " ms")
     }
 
+    @Test fun sharedAudioUsesExactMatchesOrTheSharedFeed() = runBlocking {
+        assertEquals(episode.id, store.addSharedAudio(episode.audioUrl, "Shared title"))
+        val id = store.addSharedAudio("https://tracking.example.com/different/audio.mp3", episode.title)
+        assertEquals("shared", store.library.value.episode(id)!!.feedId)
+        assertEquals(1, store.library.value.episodes.count { it.feedId == episode.feedId })
+    }
+
+    @Test fun htmlDownloadsAreRejectedAndCanBeRetried() = runBlocking {
+        store.deleteAudio(episode.id)
+        store.download(episode.id)
+        val manager = RuntimeEnvironment.getApplication().getSystemService(DownloadManager::class.java)
+        val id = store.library.value.episode(episode.id)!!.downloadId!!
+        shadowOf(shadowOf(manager).getRequest(id)).setStatus(DownloadManager.STATUS_SUCCESSFUL)
+        file.writeText("\uFEFF  <!DOCTYPE html><html>Publisher unavailable</html>")
+        store.reconcileDownloads()
+        val failed = store.library.value.episode(episode.id)!!
+        assertNull(failed.path); assertNull(failed.downloadId); assertNull(failed.managerId)
+        assertTrue(failed.error!!.contains("web page instead of audio")); assertFalse(file.exists())
+        store.download(episode.id)
+        assertNotNull(store.library.value.episode(episode.id)!!.downloadId)
+    }
+
     @Test fun completedDownloadRetainsManagerIdUntilAudioDeletion() = runBlocking {
         store.deleteAudio(episode.id)
         store.download(episode.id)

@@ -159,10 +159,10 @@ class LibraryStore(private val context: Context) : AutoCloseable {
             db.insertOrThrow("feed_defaults", null, values("feed_id" to id, "list_id" to it))
         }
     }
-    suspend fun addSharedAudio(url: String, title: String, feedId: String? = null): String = write { db ->
+    suspend fun addSharedAudio(url: String, title: String): String = write { db ->
         db.rows("SELECT id FROM episodes WHERE audio_url=?", url) { it.str("id") }.firstOrNull() ?: run {
-            val targetFeed = feedId ?: "shared"
-            if (feedId == null) db.insertWithOnConflict("feeds", null,
+            val targetFeed = "shared"
+            db.insertWithOnConflict("feeds", null,
                 values("id" to "shared", "url" to "", "name" to "Shared episodes", "expiry_days" to 30), SQLiteDatabase.CONFLICT_IGNORE)
             val id = UUID.randomUUID().toString()
             db.insertOrThrow("episodes", null, values("id" to id, "feed_id" to targetFeed, "guid" to url,
@@ -253,6 +253,11 @@ class LibraryStore(private val context: Context) : AutoCloseable {
                         if (!file.isFile || file.length() == 0L) {
                             manager.remove(downloadId)
                             db.update("episodes", values("download_id" to null, "error" to "Downloaded file is missing or empty"), "id=?", arrayOf(ep.id))
+                        } else if (isHtmlDownload(file)) {
+                            manager.remove(downloadId)
+                            if (file.exists()) check(file.delete()) { "Could not remove the invalid download" }
+                            db.update("episodes", values("download_id" to null,
+                                "error" to "The publisher returned a web page instead of audio. Try again later."), "id=?", arrayOf(ep.id))
                         } else {
                             val days = db.rows("SELECT expiry_days FROM feeds WHERE id=?", ep.feedId) { it.nullLong("expiry_days")?.toInt() }.firstOrNull()
                             val now = System.currentTimeMillis()
@@ -275,6 +280,14 @@ class LibraryStore(private val context: Context) : AutoCloseable {
             if (!File(requireNotNull(ep.path)).isFile) { ep.managerId?.let { manager.remove(it) }; clearDownload(db, ep.id) }
         }
     }
+    // Reject a clear publisher error page, not unfamiliar but potentially valid audio.
+    private fun isHtmlDownload(file: File): Boolean {
+        val prefix = file.inputStream().use { it.readNBytes(4096) }.toString(Charsets.UTF_8)
+            .removePrefix("\uFEFF").trimStart()
+        return Regex("^(?:<\\?xml[^>]*>\\s*)?(?:<!doctype\\s+html\\b|<(?:html|head|body)(?:\\s|>))", RegexOption.IGNORE_CASE)
+            .containsMatchIn(prefix)
+    }
+
     suspend fun deleteAudio(id: String) = write { db ->
         val ep = episode(db, id) ?: return@write
         require(!isProtected(db, id)) { "Remove this episode from 4ever before deleting it" }

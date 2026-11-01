@@ -149,6 +149,20 @@ public final class CoreChecks {
         equal("https://example.com/icon.png", parse("<feed xmlns='http://www.w3.org/2005/Atom'><icon>/icon.png</icon></feed>").artworkUrl(), "Atom icon artwork fallback");
         equal("https://example.com/safe.jpg", parse("<rss xmlns:itunes='http://www.itunes.com/dtds/podcast-1.0.dtd'><channel><itunes:image href='file:///private/image.png'/><image><url>/safe.jpg</url></image></channel></rss>").artworkUrl(), "unsafe artwork ignored in favor of safe RSS image");
         equal("", parse("<rss><channel><item><image><url>https://example.com/episode.jpg</url></image></item></channel></rss>").artworkUrl(), "episode artwork does not replace feed artwork");
+        String media = "<rss xmlns:m='http://search.yahoo.com/mrss/'><channel><item><guid>media</guid><m:group><m:content url='/fallback.mp3' type='audio/mpeg'/></m:group>%s</item></channel></rss>";
+        equal("https://example.com/fallback.mp3", parse(media.formatted("")).items().get(0).audioUrl(), "Media RSS audio fallback");
+        equal("https://example.com/preferred", parse(media.formatted("<enclosure url='/preferred' type='application/octet-stream'/> ")).items().get(0).audioUrl(), "enclosure wins over Media RSS");
+        equal(0, parse(media.formatted("").replace("audio/mpeg", "video/mp4")).items().size(), "Media RSS video rejected");
+        for (var pair : Map.of("02 Oct 02", "2002-10-02", "02 Oct 99", "1999-10-02", "02 Oct 70", "1970-10-02", "02 Oct 69", "2069-10-02", "2 févr. 2026", "2026-02-02").entrySet()) {
+            equal(Instant.parse(pair.getValue() + "T08:00:00Z").toEpochMilli(), parse(rss.replace("Wed, 02 Oct 2002 08:00:00 +0000", pair.getKey() + " 08:00:00 +0000")).items().get(0).published(), "short/localised date " + pair.getKey());
+        }
+        String hugeNotes = "界".repeat(FeedParser.MAX_DESCRIPTION_CHARS + 100);
+        var bounded = parse("<rss><channel><item><guid>bounded</guid><title>" + "x".repeat(5000) + "</title><description>" + hugeNotes + "</description><enclosure url='/a.mp3'/></item></channel></rss>").items().get(0);
+        equal(FeedParser.MAX_TITLE_CHARS, bounded.title().length(), "title bounded during capture");
+        equal(FeedParser.MAX_DESCRIPTION_CHARS, bounded.description().length(), "Unicode notes bounded during capture");
+        equal(true, bounded.description().endsWith("[Show notes shortened because they exceed the size limit.]"), "truncation visible");
+        rejects(() -> parse("<rss><channel><item><guid>" + "x".repeat(65537) + "</guid><enclosure url='/a.mp3'/></item></channel></rss>"), "identifiers never silently truncated");
+
         FeedParser.Feed bigFeed = largeFeed();
         equal(2200, bigFeed.items().size(), "feed larger than 8 MB imports every episode");
         equal("2200", bigFeed.items().get(2199).guid(), "large feed is not truncated");

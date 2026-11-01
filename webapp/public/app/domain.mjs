@@ -1,3 +1,4 @@
+import {xmlPreamble} from './xml.mjs';
 // Shared, dependency-free domain logic. XML functions require the browser DOMParser.
 export const SHARE_BASE = 'https://pod4me.aurelien-garivier.workers.dev/';
 const XML_NS = 'http://www.w3.org/XML/1998/namespace';
@@ -38,7 +39,7 @@ export function stableId(value) {
 
 function xmlDocument(text, limit) {
   if (typeof text !== 'string' || new TextEncoder().encode(text).length > limit) throw new Error('This file is too large.');
-  if (/<!DOCTYPE/i.test(text)) throw new Error('XML document types are not supported.');
+  xmlPreamble(text);
   if (typeof DOMParser === 'undefined') throw new Error('XML parsing needs a browser.');
   const document = new DOMParser().parseFromString(text, 'application/xml');
   if (document.getElementsByTagName('parsererror').length || document.documentElement?.localName === 'parsererror') throw new Error('The feed is not valid XML.');
@@ -121,11 +122,12 @@ export function parseFeed(xml, sourceUrl) {
   const seen = new Set();
   for (const item of items) {
     const enclosures = atom ? children(item, 'link', item.namespaceURI).filter(link => link.getAttribute('rel') === 'enclosure') : children(item, 'enclosure');
+    const media = Array.from(item.getElementsByTagNameNS('http://search.yahoo.com/mrss/', 'content')).filter(node => (node.getAttribute('type') || '').toLowerCase().startsWith('audio/'));
     let audioUrl = '';
-    for (const enclosure of enclosures) {
-      const address = optionalUrl(enclosure.getAttribute(atom ? 'href' : 'url'), nodeBase(enclosure, sourceUrl));
+    for (const enclosure of [...enclosures, ...media]) {
+      const address = optionalUrl(enclosure.getAttribute(atom && enclosure.localName === 'link' ? 'href' : 'url'), nodeBase(enclosure, sourceUrl));
       const mime = (enclosure.getAttribute('type') || '').toLowerCase().split(';')[0].trim();
-      if (address && (mime.startsWith('audio/') || mime === 'application/ogg' || (!mime && AUDIO_EXTENSION.test(address)))) { audioUrl = address; break; }
+      if (address && (mime.startsWith('audio/') || mime === 'application/ogg' || mime === 'application/octet-stream' || !mime)) { audioUrl = address; break; }
     }
     if (!audioUrl) { result.skipped++; continue; }
     const key = ownText(item, atom ? 'id' : 'guid') || audioUrl;
@@ -246,7 +248,7 @@ export function mergeFeed(state, parsed, url = parsed.url, now = Date.now()) {
     feed = {id: `f-${stableId(url)}`, url, name: parsed.name || new URL(url).hostname, subscribed: true, updated: now, artworkUrl: '', error: ''};
     state.feeds.push(feed);
   }
-  Object.assign(feed, {subscribed: true, updated: now, artworkUrl: parsed.artworkUrl || '', error: ''});
+  Object.assign(feed, {updated: now, artworkUrl: parsed.artworkUrl || '', error: ''});
   const existing = new Map();
   for (const episode of state.episodes) {
     if (episode.feedId !== feed.id) continue;
@@ -294,4 +296,30 @@ export function rankSuggestions(candidates, state) {
     ranked.push({...candidate, url, feedUrl: url, name: String(candidate.name || candidate.title || new URL(url).hostname), score, _order: index});
   }
   return ranked.sort((a, b) => b.score - a.score || a._order - b._order).map(({_order, ...candidate}) => candidate);
+}
+
+function shortText(value, limit) {
+  return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, limit) : '';
+}
+
+export function directoryRows(data) {
+  const results = [];
+  const seen = new Set();
+  for (const item of (Array.isArray(data?.results) ? data.results : []).slice(0, 200)) {
+    if (!item || typeof item !== 'object') continue;
+    const feedUrl = optionalUrl(item.feedUrl);
+    const name = shortText(item.collectionName || item.trackName, 300);
+    if (!feedUrl || !name || seen.has(feedUrl)) continue;
+    seen.add(feedUrl);
+    const collectionUrl = optionalUrl(item.collectionViewUrl || item.trackViewUrl);
+    results.push({
+      id: String(item.collectionId || item.trackId || '').replace(/[^0-9]/g, '').slice(0, 30),
+      name, artist: shortText(item.artistName, 300), feedUrl,
+      artworkUrl: optionalUrl(item.artworkUrl600 || item.artworkUrl100),
+      collectionUrl: collectionUrl && ['podcasts.apple.com', 'itunes.apple.com'].includes(new URL(collectionUrl).hostname) ? collectionUrl : '',
+      genres: Array.isArray(item.genres) ? item.genres.slice(0, 12).map(genre => shortText(genre, 100)).filter(Boolean) : [],
+    });
+    if (results.length === 40) break;
+  }
+  return results;
 }

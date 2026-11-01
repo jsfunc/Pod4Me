@@ -8,7 +8,7 @@ On 2026-10-31 the root page returned HTTP 200 and matched the generated HTML. Th
 
 **Latest user decision:** no payment and no card number. The user accepts keeping the APK on ENS because the current file exceeds Cloudflare's normal static-file upload limit. The proposed R2 migration and ENS-folder retirement are cancelled; do not ask for an R2 URL or activate billing.
 
-The APK is hosted at **https://perso.ens-lyon.fr/aurelien.garivier/diffusion/Pod4Me.apk**. Verified on 2026-10-31 at 17:43 UTC: HTTP 200, Android APK content type, 29,045,117 bytes; the full downloaded file exactly matches local signed **1.0.11/code 19**, SHA-256 `c3fd538230cee20d655743e4aed3d90b5b524c462bc17264daad1376289bd299`. This supersedes the earlier 14:46 UTC verification of 1.0.10. Phone installation and WhatsApp handoff remain pending. Keep the folder and APK while this download URL is used. The web app/sharing page are deployed on Cloudflare; the APK remains on ENS.
+The APK is hosted at **https://perso.ens-lyon.fr/aurelien.garivier/diffusion/Pod4Me.apk**. Verified 2026-11-01 at 12:45 UTC: HTTP 200, 29,045,117 bytes; the full public download matches local signed **1.0.12/code 20**, SHA-256 `5a9afba96ee256dbc5b1ea0f8827e1652b22b3294f0a57a8a5cfcd51b21cdfed`. This supersedes the earlier 1.0.11 upload verification. Phone installation and WhatsApp handoff remain pending. Keep the folder and APK while this download URL is used. The web app/sharing page are deployed on Cloudflare; the APK remains on ENS.
 
 The APK is 29,045,117 bytes (about 27.7 MiB), above the **25 MiB per-file** Workers Static Assets limit. It cannot be uploaded unchanged through that static upload route. A future smaller APK could fit, but reducing/repackaging the app is not part of this hosting-only change. [Workers limits](https://developers.cloudflare.com/workers/platform/limits/).
 
@@ -16,7 +16,7 @@ The APK is 29,045,117 bytes (about 27.7 MiB), above the **25 MiB per-file** Work
 
 ## Website files and future updates
 
-The independent web app is now deployed at `/app/`, with a metadata Worker at `/api/*`. **Public core app verification passed on 2026-10-31.** The Apple directory currently rejects requests from Cloudflare (429 for search, 403 for charts); feed subscriptions and streaming work. Use the new complete package and [web app instructions](web-app.md):
+The independent web app is now deployed at `/app/`, with a metadata Worker at `/api/*`. **Public core app verification passed on 2026-10-31.** The 2026-11-01 update moves Apple directory calls into the browser. Live app HTML and JavaScript now match this update; the user reports successful tests. Use the new complete package and [web app instructions](web-app.md):
 
 ```sh
 node tools/test_link_site.cjs

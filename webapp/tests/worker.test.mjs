@@ -91,9 +91,7 @@ test('validates unsafe, malformed, local, literal-IP, credentialed and nonstanda
 
 test('rejects missing, duplicate and unsupported query parameters', async () => {
   neverFetch();
-  for (const path of ['/api/feed', `/api/feed?url=${FEED}&url=${FEED}`, `/api/feed?url=${FEED}&headers=secret`,
-    '/api/search', '/api/search?term=', '/api/search?term=a&term=b', '/api/chart?country=fr&limit=1000',
-    '/api/search?term=test&country=France', '/api/search?term=' + 'a'.repeat(151), '/api/search?term=a%00b']) {
+  for (const path of ['/api/feed', `/api/feed?url=${FEED}&url=${FEED}`, `/api/feed?url=${FEED}&headers=secret`]) {
     assert.equal((await call(path)).status, 400, path);
   }
 });
@@ -288,84 +286,24 @@ test('does not cache errors and tolerates unavailable cache storage', async () =
   assert.equal((await call()).status, 200);
 });
 
-const podcast = (id, name = 'A podcast') => ({collectionId: id, collectionName: name, artistName: 'Publisher',
-  feedUrl: `https://feeds.publisher.org/${id}.xml`, artworkUrl600: 'https://images.publisher.org/cover.jpg',
-  collectionViewUrl: `https://podcasts.apple.com/fr/podcast/id${id}`, genres: ['Science']});
 
-test('search uses only the fixed Apple endpoint with bounded parameters and sanitized results', async () => {
-  let requested;
-  globalThis.fetch = async (url, options) => {
-    requested = {url: new URL(url), options};
-    return json({results: [podcast(1, 'Show\u0000 name'), podcast(1), {...podcast(2), feedUrl: 'http://127.0.0.1/feed'},
-      {...podcast(3), artworkUrl600: 'javascript:alert(1)', collectionViewUrl: 'https://hostile.org/track', genres: ['Music', 123, null]},
-      null, {collectionName: 'No URL'}]});
-  };
-  const response = await call('/api/search?term=radio%20science%26other%3D1&country=FR');
-  assert.equal(response.status, 200);
-  assert.equal(requested.url.origin + requested.url.pathname, 'https://itunes.apple.com/search');
-  assert.equal(requested.url.searchParams.get('term'), 'radio science&other=1');
-  assert.equal(requested.url.searchParams.get('country'), 'fr');
-  assert.equal(requested.url.searchParams.get('limit'), '40');
-  assert.equal(requested.url.searchParams.get('media'), 'podcast');
-  assert.equal(requested.options.credentials, 'omit');
-  const {results} = await response.json();
-  assert.equal(results.length, 2);
-  assert.equal(results[0].name, 'Show  name');
-  assert.deepEqual(Object.keys(results[0]).sort(), ['id', 'name', 'artist', 'feedUrl', 'artworkUrl', 'collectionUrl', 'genres'].sort());
-  assert.equal(results[1].artworkUrl, '');
-  assert.equal(results[1].collectionUrl, '');
-  assert.deepEqual(results[1].genres, ['Music']);
-  assert.equal(response.headers.get('Cache-Control'), 'public, max-age=600');
+test('directory endpoints are retired without contacting upstream', async () => {
+  neverFetch();
+  for (const path of ['/api/search?term=science', '/api/chart?country=fr']) assert.equal((await call(path)).status, 404);
 });
 
-test('caps search results and field sizes even if a directory sends more than requested', async () => {
-  globalThis.fetch = async () => json({results: Array.from({length: 100}, (_, n) => ({...podcast(n + 1, 'x'.repeat(500)),
-    artistName: 'a'.repeat(400), genres: Array(20).fill('g'.repeat(150))}))});
-  const {results} = await (await call('/api/search?term=science')).json();
-  assert.equal(results.length, 40);
-  assert.equal(results[0].name.length, 300);
-  assert.equal(results[0].artist.length, 300);
-  assert.equal(results[0].genres.length, 12);
-  assert.equal(results[0].genres[0].length, 100);
-});
-
-test('chart resolves safe IDs through one lookup, keeps chart order, and spaces directory requests', async () => {
-  const requests = [];
-  const waits = [];
-  globalThis.setTimeout = (fn, ms, ...args) => {
-    if (ms !== 30_000) waits.push(ms);
-    return realSetTimeout(fn, ms === 30_000 ? ms : 0, ...args);
-  };
-  globalThis.fetch = async url => {
-    requests.push(new URL(url));
-    if (requests.length === 1) return json({feed: {entry: ['2', '1', '2', 'bad&url=x'].map(id => ({id: {attributes: {'im:id': id}}}))}});
-    return json({results: [podcast(1), podcast(2)]});
-  };
-  const response = await call('/api/chart?country=fr');
-  assert.equal(response.status, 200);
-  assert.deepEqual((await response.json()).results.map(item => item.id), ['2', '1']);
-  assert.equal(requests.length, 2);
-  assert.equal(requests[0].href, 'https://itunes.apple.com/fr/rss/toppodcasts/limit=40/json');
-  assert.equal(requests[1].origin + requests[1].pathname, 'https://itunes.apple.com/lookup');
-  assert.equal(requests[1].searchParams.get('id'), '2,1');
-  assert.equal(waits.length, 1);
-  assert.ok(waits[0] > 3000 && waits[0] <= 3100);
-});
-
-test('empty country chart returns an empty result without an unnecessary lookup', async () => {
-  let calls = 0;
-  globalThis.fetch = async () => { calls++; return json({feed: {entry: []}}); };
-  assert.deepEqual(await (await call('/api/chart')).json(), {results: []});
-  assert.equal(calls, 1);
-});
-
-test('directory redirects cannot escape Apple and directory bodies have a separate 2 MiB limit', async () => {
-  let calls = 0;
-  globalThis.fetch = async () => { calls++; return new Response(null, {status: 302, headers: {Location: 'https://hostile.org/api'}}); };
-  assert.equal((await call('/api/search?term=science')).status, 502);
-  assert.equal(calls, 1);
-  globalThis.fetch = async () => new Response('{}', {headers: {'Content-Type': 'application/json', 'Content-Length': String(2 * 1024 * 1024 + 1)}});
-  assert.equal((await call('/api/search?term=science')).status, 413);
-  globalThis.fetch = async () => new Response('not JSON', {headers: {'Content-Type': 'application/json'}});
-  assert.equal((await call('/api/search?term=science')).status, 502);
+test('UTF-16 feeds and harmless DOCTYPE text pass; real DTDs fail in any encoding', async () => {
+  for (const bigEndian of [false, true]) {
+    const encode = value => {
+      const bytes = Buffer.from('\ufeff' + value, 'utf16le');
+      return bigEndian ? bytes.swap16() : bytes;
+    };
+    const body = RSS.replace('<title>Example</title>', '<description><![CDATA[<!DOCTYPE html><html>Notes</html>]]></description>');
+    globalThis.fetch = async () => xml(encode(body));
+    assert.equal((await call()).status, 200);
+    globalThis.fetch = async () => xml(encode('<!DOCTYPE rss [<!ENTITY x "boom">]><rss><channel/></rss>'));
+    assert.equal((await call()).status, 415);
+  }
+  globalThis.fetch = async () => xml('<!-- <!DOCTYPE harmless> -->' + RSS.replace('<?xml version="1.0"?>', ''));
+  assert.equal((await call()).status, 200);
 });

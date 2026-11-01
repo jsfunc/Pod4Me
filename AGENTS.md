@@ -3,7 +3,7 @@
 Before changing the app, read [docs/handover.md](docs/handover.md), then [README.md](README.md). The handover records the user's accepted requirements, current UI, architecture, release/signing workflow, regression traps, and pending work. Do not depend on chat history or ask the user to reconstruct decisions already recorded there.
 
 - Inspect `git status` and current source first. Preserve existing user changes. Dates, commit IDs and artifact hashes in the notes are snapshots, not substitutes for checking the current tree.
-- `goal.txt` is the original specification; later accepted decisions in the handover supersede it where they differ. `audit.txt` is a historical audit, not a current list of unfixed bugs.
+- `goal.txt` is the original specification; later accepted decisions in the handover supersede it where they differ. `audit.txt` is the 2026-11-01 code audit (it replaces the 2026-10-29 audit and records that audit's disposition); its S/B/D findings are open unless the handover records otherwise.
 - Keep the latest compact UI and storage/playback rules unless the user requests a change. In particular, the recent artwork changes intentionally exclude Library cards.
 - Use explicit, data-preserving SQLite migrations. Preserve the personal signing certificate so updates do not require uninstalling the app.
 - Use `./tools/build-apk.sh` for the release build. See the handover for sandbox limitations and the normal-terminal fallback. Never describe an older APK as containing new source changes.

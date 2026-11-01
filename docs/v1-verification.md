@@ -1,6 +1,45 @@
 # Pod4Me verification
 
-Current source version: 1.0.11, code 19. Database version: 5. Audit baseline: `audit.txt`. Earlier sections below preserve historical 1.0.0 evidence; later sections record the orange theme and duration-label releases.
+Current source version: 1.0.12, code 20. Database version: 5. Audit baseline: `audit.txt`. Earlier sections below preserve historical 1.0.0 evidence; later sections record the orange theme and duration-label releases.
+
+## 2026-11-01 audit corrections — local release 1.0.12
+
+The user approved the proposals derived from the new audit, explicitly excluded signing S1, and clarified that this is pre-production with no existing users. Audit text is retained as the original baseline; current disposition is below.
+
+| Findings | Implemented change | Evidence / limitation |
+| --- | --- | --- |
+| B1 | Browser calls Apple directly; Worker directory routes removed; CSP/privacy updated; bounded sanitized requests, spacing, timeout and cache | Four directory unit tests and Chromium UI checks. Prepared assets on the real public HTTPS origin returned 25 search results, successful chart/lookup HTTP 200 and eight suggestions. This used local `/app/` asset interception, not deployment. |
+| B2 | Retain 64 MiB feed limit; cap each captured title at 4,096 and notes at 1,048,576 UTF-16 characters, show shortening markers; reject oversized identifiers | Core tests include Unicode notes. Separate JVM `-Xmx256m` probes of 61 MiB feeds completed; see measurements below. Total retained metadata still scales with feed size; no claim of a fixed heap cap or ART profiling. |
+| B3/B8 | Media RSS audio fallback and consistent generic/absent enclosure MIME handling | Core/browser XML tests verify fallback and enclosure precedence. Web public-host/standard-port restrictions retained and documented. |
+| B4/B5 | Shared bounded XML preamble checking and BOM/charset/declaration decoding in relay/browser | UTF-16LE/BE, Latin-1 declarations, harmless CDATA/comment DOCTYPE text accepted; real DTDs rejected. |
+| B6 | Refresh preserves subscription state; explicit Subscribe/Import remains intentional | Domain test plus browser unsubscribe → Refresh → explicit Subscribe flow. |
+| B7 | Separate episode playback records and tiny shared revision key in IndexedDB v2 | Real IndexedDB migration, ordered snapshots, Unheard reset, stale full/progress writes, transaction rollback/recovery and backup/restore passed. 100,000 episodes: progress save 1.1 ms, 59-byte record plus revision; no full-library read/write. Metadata changes still perform full validation/saves. |
+| B9 | Exact audio-URL reuse; unmatched shared downloads belong to Shared episodes even with Also subscribe | Store regression verifies no guessed catalogue identity or duplicate feed row. |
+| B10/B11 | Busy actions explain retry; slashless root recommendation URLs parse normally | AppModel and sharing unit tests. Incoming suggestion remains available when busy. |
+| B12/B13 | Reject clear HTML downloads; failed player stops/unloads before deletion protection clears; synchronous Unheard seek guard | DownloadManager/service tests verify retry, deletion after failure, paused protection and stale-progress reset. Unknown audio headers are not rejected; phone audio behavior remains pending. |
+| B14 | English/French dates and two-digit years with explicit 1970–2069 window | Core regressions cover 02, 69, 70, 99 and French February. |
+| S5 | Local APK server exposes only top-level APK/checksum files, with no listings or symlink escape | Eight HTTP file-boundary checks passed. |
+| B15/D3 | Platform differences documented; handover current state separated from history | Documentation reconciled, historical evidence retained. |
+
+S1 is excluded by the user. S2 transport-policy changes, S3 infrastructure rate limiting, S8 dependency upgrades and B16 scroll-cache eviction remain deferred as proposed. S4/S6/S7 need no current code change. For S3, a Worker rate limiter runs after invocation and is approximate, so it cannot guarantee protection of the daily request quota; no paid resources, forced browser-header authentication or new account flow was introduced. D1 remains open: ADB could not start due to host inotify/resource exhaustion; no instrumented Android tests or phone acceptance ran. D2's deployed-byte observation applies to the older public bundle.
+
+Canonical build: `JAVA_HOME=/home/aurelien/android-studio/jbr ./tools/build-apk.sh`, log `/tmp/pod4me-audit-build.log`, **BUILD SUCCESSFUL in 2m 16s**. **108 core checks**, **11 schema/XML checks**, **85 unit tests** (zero failures/errors/skips); release lint **zero errors / 24 warnings**. Release APK and device-test APK assembled; device tests compiled, not executed. The core suite also runs inside the unit suite, so these counts must not be added as independent tests.
+
+Delivered local files: `dist/Pod4Me.apk` and identical `dist/Pod4Me-1.0.12.apk`; version **1.0.12/code 20**, **29,045,117 bytes**, SHA-256 `5a9afba96ee256dbc5b1ea0f8827e1652b22b3294f0a57a8a5cfcd51b21cdfed`. The release script verified the version, non-debuggable status and unchanged certificate `134a95237bf3ac990be2f7d1f33fdc7e9e6d16682401d3445cd9ad6fc10ff03f`. Signing code and credentials were not changed.
+
+Desktop parser probes streamed approximately 61 MiB through the compiled parser with `-Xmx256m`, 8,192-character descriptions and no retained raw XML buffer:
+
+| Notes | Episodes | Live heap after GC | Sum of heap-pool peaks | Elapsed including GC wait |
+| --- | ---: | ---: | ---: | ---: |
+| Latin `x` | 7,690 | 67.4 MiB | 169.9 MiB | 454 ms |
+| Greek `Ω` | 3,875 | 66.7 MiB | 223.2 MiB | 438 ms |
+| CJK `界` | 2,590 | 45.8 MiB | 188.3 MiB | 363 ms |
+
+Pool peaks need not occur simultaneously. These measurements establish completion for these desktop fixtures, not an Android heap guarantee. Per-field caps prevent a single enormous retained note/title; incremental database ingestion remains unnecessary for the measured cases and is not included.
+
+Web validation: 42 Node tests, full Chromium suite (six XML parser groups plus real IndexedDB stress/rollback cases), prepared-origin live feed/audio/Apple checks and Wrangler dry run passed. `dist/Pod4Me-web.zip` is prepared. No Worker deployment, ENS upload, Android installation, iPhone/WhatsApp or physical media-control test was performed.
+
+Follow-up publication/acceptance: ENS was verified to host the exact signed 1.0.12 APK on 2026-11-01 at 12:45 UTC. After deployment instructions, the user reported “tests are ok” and requested commit/push. The live HTML and five app JavaScript modules were then downloaded and confirmed byte-identical to current source. This supersedes the earlier publication-pending status; individual device results and instrumented Android execution are not inferred from the general report.
 
 ## Audit disposition
 

@@ -62,6 +62,25 @@ class PlaybackServiceTest {
         } finally { service.destroy() }
     }
 
+    @Test fun failedPlaybackUnloadsAndAllowsDeletionButPausedPlaybackIsProtected() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val episodes = queuedEpisodes(app)
+        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        try {
+            val ep = episodes.first()
+            service.get().startEpisode(ep.id, episodes.map { it.id }, 1000, play = false)
+            assertEquals(ep.id, app.store.activeEpisode.get())
+            try { app.store.deleteAudio(ep.id); fail("Paused current audio must be protected") }
+            catch (_: IllegalArgumentException) {}
+            service.get().handlePlaybackError()
+            assertNull(app.store.activeEpisode.get())
+            assertEquals(0, player(service.get()).mediaItemCount)
+            assertFalse(player(service.get()).playWhenReady)
+            app.store.deleteAudio(ep.id)
+            assertFalse(File(ep.path!!).exists())
+        } finally { service.destroy() }
+    }
+
     private suspend fun queuedEpisodes(app: PodApplication): List<com.pod4me.domain.Episode> {
         app.store.initialize()
         app.store.saveFeed("https://example.com/queue", FeedParser.Feed("Queue", (1..3).map {

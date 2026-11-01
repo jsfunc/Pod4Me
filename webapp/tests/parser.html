@@ -39,6 +39,26 @@ check('OPML: nested folders, titles, duplication and URL validation', () => {
   try { parseFeedList('<opml><body><outline xmlUrl="http://localhost/rss"/></body></opml>'); } catch { rejected = true; }
   assert(rejected, 'Unsafe OPML URL accepted');
 });
+check('Harmless DOCTYPE text, UTF-16 and Media RSS fallback', () => {
+  const xml = `<rss xmlns:m="http://search.yahoo.com/mrss/"><channel><item><guid>one</guid><description><![CDATA[<!DOCTYPE html><p>Safe notes</p>]]></description><m:group><m:content url="https://audio.podcast.org/fallback" type="audio/mpeg"/></m:group><enclosure url="https://audio.podcast.org/preferred" type="application/octet-stream"/></item><item><guid>two</guid><m:content url="https://audio.podcast.org/two" type="audio/ogg"/></item></channel></rss>`;
+  const parsed = parseFeed(xml, base);
+  assert(parsed.episodes.length === 2, 'Media RSS fallback missing');
+  assert(parsed.episodes[0].audioUrl.endsWith('/preferred'), 'Enclosure must win');
+  assert(parsed.episodes[0].description === 'Safe notes', 'CDATA notes changed');
+  assert(parseFeed('<!-- <!DOCTYPE html> -->' + xml, base).episodes.length === 2, 'Comment rejected');
+});
+const {decodeXml} = await import('/app/xml.mjs');
+check('UTF-16 BOMs decode without HTTP charset; XML encoding declarations are honoured', () => {
+  const xml = '<rss><channel><title>Café 界</title></channel></rss>';
+  for (const big of [false,true]) {
+    const bytes = new Uint8Array((xml.length+1)*2), view = new DataView(bytes.buffer);
+    view.setUint16(0,0xfeff,!big);
+    for(let i=0;i<xml.length;i++)view.setUint16((i+1)*2,xml.charCodeAt(i),!big);
+    assert(parseFeed(decodeXml(bytes),base).name==='Café 界','UTF-16 decoding');
+  }
+  const latin = '<?xml version="1.0" encoding="iso-8859-1"?><rss><channel><title>Café</title></channel></rss>';
+  assert(parseFeed(decodeXml(Uint8Array.from(latin,c=>c.charCodeAt(0))),base).name==='Café','XML declaration ignored');
+});
 window.__parserResults = results;
 document.querySelector('#results').textContent = JSON.stringify(results, null, 2);
 document.title = results.every(result => result.ok) ? 'PASS' : 'FAIL';

@@ -1,11 +1,10 @@
+import {decodeXml, xmlPreamble} from './public/app/xml.mjs';
+
 // Public metadata only. Audio and artwork are loaded directly by the browser.
 // No accounts, cookies, bindings requiring storage, or credentials are needed.
 const FEED_LIMIT = 32 * 1024 * 1024;
-const DIRECTORY_LIMIT = 2 * 1024 * 1024;
 const TIMEOUT_MS = 30_000;
 const REDIRECT_LIMIT = 5;
-const PREFIX_LIMIT = 64 * 1024;
-const DIRECTORY_HOSTS = new Set(['itunes.apple.com']);
 const SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
@@ -71,17 +70,14 @@ async function cancel(response) {
   try { await response.body?.cancel(); } catch { /* Already closed or aborted. */ }
 }
 
-async function upstream(startUrl, {signal, limit, directory = false, ownHost}) {
+async function upstream(startUrl, {signal, limit, ownHost}) {
   let url = publicUrl(startUrl, ownHost);
   for (let redirects = 0; ; redirects++) {
-    if (directory && !DIRECTORY_HOSTS.has(url.hostname)) {
-      throw new ApiError(502, 'The podcast directory redirected to an unsupported address.');
-    }
     // A fresh header set deliberately excludes the caller's Cookie,
     // Authorization, Referer, Origin, and all conditional/range headers.
     const response = await fetch(url.href, {
       method: 'GET', redirect: 'manual', credentials: 'omit', signal,
-      headers: {Accept: directory ? 'application/json' : 'application/rss+xml, application/atom+xml, application/xml, text/xml, text/plain;q=0.8',
+      headers: {Accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml, text/plain;q=0.8',
         'User-Agent': 'Pod4Me-Web/1.0 (public podcast metadata)'},
     });
     if ([301, 302, 303, 307, 308].includes(response.status)) {
@@ -97,19 +93,18 @@ async function upstream(startUrl, {signal, limit, directory = false, ownHost}) {
     }
     if (!response.ok || response.status === 204 || response.status === 206) {
       await cancel(response);
-      throw new ApiError(502, `The ${directory ? 'podcast directory' : 'publisher'} could not supply this feed (HTTP ${response.status}). Try again later.`);
+      throw new ApiError(502, `The publisher could not supply this feed (HTTP ${response.status}). Try again later.`);
     }
     const type = (response.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
-    const allowed = directory ? (type === 'application/json' || type === 'text/javascript' || type === 'text/json') :
-      (!type || ['application/rss+xml', 'application/atom+xml', 'application/xml', 'text/xml', 'text/plain', 'application/octet-stream'].includes(type));
+    const allowed = (!type || ['application/rss+xml', 'application/atom+xml', 'application/xml', 'text/xml', 'text/plain', 'application/octet-stream'].includes(type));
     if (!allowed) {
       await cancel(response);
-      throw new ApiError(415, directory ? 'The podcast directory returned an unexpected format.' : 'This address does not return an RSS or Atom feed. Use the podcast’s feed URL, not its audio or website URL.');
+      throw new ApiError(415, 'This address does not return an RSS or Atom feed. Use the podcast’s feed URL, not its audio or website URL.');
     }
     const length = Number(response.headers.get('Content-Length'));
     if (Number.isFinite(length) && length > limit) {
       await cancel(response);
-      throw new ApiError(413, directory ? 'The directory response is too large.' : 'This feed exceeds the 32 MiB web limit.');
+      throw new ApiError(413, 'This feed exceeds the 32 MiB web limit.');
     }
     if (!response.body) throw new ApiError(502, 'The publisher returned an empty response.');
     const reader = response.body.getReader();
@@ -122,7 +117,7 @@ async function upstream(startUrl, {signal, limit, directory = false, ownHost}) {
         size += value.byteLength;
         if (size > limit) {
           await reader.cancel();
-          throw new ApiError(413, directory ? 'The directory response is too large.' : 'This feed exceeds the 32 MiB web limit.');
+          throw new ApiError(413, 'This feed exceeds the 32 MiB web limit.');
         }
         chunks.push(value);
       }
@@ -134,98 +129,24 @@ async function upstream(startUrl, {signal, limit, directory = false, ownHost}) {
   }
 }
 
-function verifyFeed(bytes) {
-  // Inspect only a bounded preamble. Parsing and episode extraction happen in
-  // the browser, away from the Free Worker's short CPU allowance. XML entities
-  // are never expanded here; DTD declarations before the root are rejected.
-  let prefix = new TextDecoder().decode(bytes.subarray(0, PREFIX_LIMIT)).replace(/^\uFEFF/, '').trimStart();
-  for (let i = 0; i < 256; i++) {
-    if (prefix.startsWith('<?')) {
-      const end = prefix.indexOf('?>');
-      if (end < 0) break;
-      prefix = prefix.slice(end + 2).trimStart();
-    } else if (prefix.startsWith('<!--')) {
-      const end = prefix.indexOf('-->');
-      if (end < 0) break;
-      prefix = prefix.slice(end + 3).trimStart();
-    } else break;
-  }
-  if (/^<!DOCTYPE\b/i.test(prefix)) throw new ApiError(415, 'Feeds containing XML document type declarations are not supported.');
-  if (!/^<(?:[A-Za-z_][\w.-]*:)?(?:rss|feed)(?:\s|\/?>)/.test(prefix)) {
-    throw new ApiError(415, 'This address does not contain a supported RSS or Atom feed.');
-  }
-}
-
-function jsonDirectory(bytes) {
-  try { return JSON.parse(new TextDecoder().decode(bytes)); }
-  catch { throw new ApiError(502, 'The podcast directory returned unreadable data. Try again later.'); }
-}
-
-function shortText(value, limit) {
-  return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, limit) : '';
-}
-
-function optionalUrl(value) {
-  try { return publicUrl(value).href; } catch { return ''; }
-}
-
-function directoryRows(data) {
-  const results = [];
-  const seen = new Set();
-  for (const item of (Array.isArray(data?.results) ? data.results : []).slice(0, 200)) {
-    if (!item || typeof item !== 'object') continue;
-    const feedUrl = optionalUrl(item.feedUrl);
-    const name = shortText(item.collectionName || item.trackName, 300);
-    if (!feedUrl || !name || seen.has(feedUrl)) continue;
-    seen.add(feedUrl);
-    const collectionUrl = optionalUrl(item.collectionViewUrl || item.trackViewUrl);
-    results.push({
-      id: String(item.collectionId || item.trackId || '').replace(/[^0-9]/g, '').slice(0, 30),
-      name, artist: shortText(item.artistName, 300), feedUrl,
-      artworkUrl: optionalUrl(item.artworkUrl600 || item.artworkUrl100),
-      collectionUrl: collectionUrl && ['podcasts.apple.com', 'itunes.apple.com'].includes(new URL(collectionUrl).hostname) ? collectionUrl : '',
-      genres: Array.isArray(item.genres) ? item.genres.slice(0, 12).map(genre => shortText(genre, 100)).filter(Boolean) : [],
-    });
-    if (results.length === 40) break;
-  }
-  return results;
-}
-
-function waitForDirectory(ms, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) { reject(signal.reason); return; }
-    const abort = () => { clearTimeout(timer); reject(signal.reason); };
-    const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, ms);
-    signal.addEventListener('abort', abort, {once: true});
-  });
+function verifyFeed(bytes, contentType) {
+  try {
+    const prefix = xmlPreamble(decodeXml(bytes.subarray(0, 65536), contentType, true));
+    if (!/^<(?:[A-Za-z_][\w.-]*:)?(?:rss|feed)(?:\s|\/?>)/.test(prefix)) {
+      throw new Error('This address does not contain a supported RSS or Atom feed.');
+    }
+  } catch (error) { throw new ApiError(415, error.message); }
 }
 
 async function api(request, env, ctx) {
   const url = new URL(request.url);
   sameOrigin(request, url);
   if (request.method !== 'GET') return failure(405, 'Only GET requests are supported.', {Allow: 'GET'});
-  let source;
-  let country;
-  let term;
-  if (url.pathname === '/api/feed') {
-    parameters(url, ['url']);
-    source = publicUrl(url.searchParams.get('url'), url.hostname).href;
-  } else if (url.pathname === '/api/search' || url.pathname === '/api/chart') {
-    parameters(url, url.pathname === '/api/search' ? ['term', 'country'] : ['country']);
-    country = (url.searchParams.get('country') || 'fr').toLowerCase();
-    if (!/^[a-z]{2}$/.test(country)) throw new ApiError(400, 'Choose a two-letter country code.');
-    if (url.pathname === '/api/search') {
-      term = (url.searchParams.get('term') || '').trim();
-      if (!term || term.length > 150 || /[\u0000-\u001f\u007f]/.test(term)) throw new ApiError(400, 'Enter a search between 1 and 150 characters.');
-    }
-  } else return failure(404, 'This podcast API endpoint does not exist.');
-
+  if (url.pathname !== '/api/feed') return failure(404, 'This podcast API endpoint does not exist.');
+  parameters(url, ['url']);
+  const source = publicUrl(url.searchParams.get('url'), url.hostname).href;
   const cacheUrl = new URL(url.pathname, url.origin);
-  if (source) cacheUrl.searchParams.set('url', source);
-  else {
-    cacheUrl.searchParams.set('country', country);
-    if (term) cacheUrl.searchParams.set('term', term);
-  }
+  cacheUrl.searchParams.set('url', source);
   const cacheKey = new Request(cacheUrl.href);
   const cache = globalThis.caches?.default;
   if (cache) {
@@ -240,42 +161,14 @@ async function api(request, env, ctx) {
   const options = {signal: controller.signal, ownHost: url.hostname};
   let response;
   try {
-    if (source) {
-      const result = await upstream(source, {...options, limit: FEED_LIMIT});
-      verifyFeed(result.bytes);
-      // Preserve declared text encoding, but always give the response an XML
-      // media type (plain/octet-stream publisher responses are accepted above).
-      const charset = /;\s*charset\s*=\s*(["']?)([a-zA-Z0-9_-]+)\1/i.exec(result.contentType || '')?.[2];
-      response = new Response(result.bytes, {headers: {...SECURITY_HEADERS,
-        'Content-Type': `application/xml${charset ? `; charset=${charset}` : ''}`,
-        'X-Feed-URL': result.url, 'Cache-Control': 'public, max-age=300'}});
-    } else {
-      options.limit = DIRECTORY_LIMIT;
-      options.directory = true;
-      let data;
-      if (term) {
-        const search = new URL('https://itunes.apple.com/search');
-        search.search = new URLSearchParams({term, country, media: 'podcast', entity: 'podcast', limit: '40'}).toString();
-        data = jsonDirectory((await upstream(search.href, options)).bytes);
-      } else {
-        const started = Date.now();
-        const chart = jsonDirectory((await upstream(`https://itunes.apple.com/${country}/rss/toppodcasts/limit=40/json`, options)).bytes);
-        const entries = Array.isArray(chart?.feed?.entry) ? chart.feed.entry : [];
-        const ids = [...new Set(entries.slice(0, 40).map(entry => String(entry?.id?.attributes?.['im:id'] || '')).filter(id => /^\d{1,20}$/.test(id)))];
-        if (!ids.length) data = {results: []};
-        else {
-          // Chart metadata omits RSS URLs. Resolve IDs with one bounded lookup,
-          // preserving the directory's 3.1-second spacing within this request.
-          await waitForDirectory(Math.max(0, 3100 - (Date.now() - started)), controller.signal);
-          const lookup = new URL('https://itunes.apple.com/lookup');
-          lookup.search = new URLSearchParams({id: ids.join(','), country, entity: 'podcast', limit: '40'}).toString();
-          data = jsonDirectory((await upstream(lookup.href, options)).bytes);
-          if (Array.isArray(data?.results)) data.results.sort((a, b) => ids.indexOf(String(a?.collectionId)) - ids.indexOf(String(b?.collectionId)));
-        }
-      }
-      response = new Response(JSON.stringify({results: directoryRows(data)}), {headers: {...SECURITY_HEADERS,
-        'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'public, max-age=600'}});
-    }
+    const result = await upstream(source, {...options, limit: FEED_LIMIT});
+    verifyFeed(result.bytes, result.contentType);
+    // Preserve declared text encoding, but always give the response an XML
+    // media type (plain/octet-stream publisher responses are accepted above).
+    const charset = /;\s*charset\s*=\s*(["']?)([a-zA-Z0-9_-]+)\1/i.exec(result.contentType || '')?.[2];
+    response = new Response(result.bytes, {headers: {...SECURITY_HEADERS,
+      'Content-Type': `application/xml${charset ? `; charset=${charset}` : ''}`,
+      'X-Feed-URL': result.url, 'Cache-Control': 'public, max-age=300'}});
   } catch (error) {
     if (controller.signal.aborted) throw new ApiError(504, 'The publisher took too long to respond. Please try again.');
     if (error instanceof ApiError) throw error;

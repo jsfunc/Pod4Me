@@ -5,6 +5,11 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SuggestionsTest {
+    @Test fun rootSharingLinkDoesNotRequireASlash() {
+        val feed = Feed("f", "https://example.com/rss", "Café", 30)
+        assertEquals(Suggestion(feed.url, "feed", feed.name), Suggestions.parse(Suggestions.feed(feed).replace("/#", "#")))
+    }
+
     @Test fun outgoingMessageHasOneHttpsLinkAndNoDuplicateAudioUrl() {
         val episode = Episode("e", "f", "A & B + Café?", "https://example.com/audio.mp3", "", 0)
         val message = Suggestions.episode(episode, null)

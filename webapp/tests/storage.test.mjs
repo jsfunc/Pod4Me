@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {emptyLibrary, mergeFeed} from '../public/app/domain.mjs';
-import {loadLibrary, saveLibrary, validateBackup, makeBackup} from '../public/app/storage.mjs';
+import {loadLibrary, saveLibrary, savePlayback, validateBackup, makeBackup} from '../public/app/storage.mjs';
 
 function library() {
   const state = emptyLibrary();
@@ -99,104 +99,12 @@ test('unavailable browser storage rejects explicitly without pretending to save'
   await assert.rejects(saveLibrary(library()), /storage is unavailable/, 'A failed save does not poison later attempts');
 });
 
-test('saves snapshot immediately, commit in order, and recover after a rejected transaction', async () => {
-  const pending = [];
-  let stored;
-  const original = globalThis.indexedDB;
-  const database = {
-    objectStoreNames: {contains: name => name === 'library'},
-    close() {},
-    transaction(name, mode) {
-      assert.equal(name, 'library');
-      const transaction = {
-        abort() { transaction.onabort(); },
-        objectStore() {
-          return {
-            put(value, key) {
-              assert.equal(key, 'current');
-              const request = {};
-              pending.push({value, finish(fail = false) {
-                if (fail) { transaction.error = new Error('Quota exceeded'); transaction.onabort(); }
-                else { stored = structuredClone(value); request.onsuccess?.(); transaction.oncomplete(); }
-              }});
-              return request;
-            },
-            get(key) {
-              assert.equal(key, 'current');
-              const request = {};
-              queueMicrotask(() => { request.result = structuredClone(stored); request.onsuccess(); if (mode === 'readonly') transaction.oncomplete(); });
-              return request;
-            },
-          };
-        },
-      };
-      return transaction;
-    },
-  };
-  globalThis.indexedDB = {
-    open(name, version) {
-      assert.equal(name, 'pod4me-web');
-      assert.equal(version, 1);
-      const request = {result: database};
-      queueMicrotask(() => request.onsuccess());
-      return request;
-    },
-  };
-  const tick = () => new Promise(resolve => setImmediate(resolve));
-  try {
-    const state = library();
-    const first = saveLibrary(state);
-    state.feeds[0].name = 'Second snapshot';
-    const second = saveLibrary(state);
-    state.feeds[0].name = 'Later unsaved mutation';
-    await tick();
-    assert.equal(pending.length, 1, 'The second transaction waits for first commit');
-    assert.equal(pending[0].value.library.feeds[0].name, 'Custom name');
-    assert.equal(pending[0].value.revision, 1);
-    pending.shift().finish();
-    await first;
-    await tick();
-    assert.equal(pending.length, 1);
-    assert.equal(pending[0].value.library.feeds[0].name, 'Second snapshot');
-    assert.equal(pending[0].value.revision, 2);
-    pending.shift().finish();
-    await second;
-    assert.equal((await loadLibrary()).feeds[0].name, 'Second snapshot');
-    const rejected = saveLibrary(state);
-    const rejection = assert.rejects(rejected, /could not be saved/);
-    const recovery = saveLibrary(library());
-    await tick();
-    pending.shift().finish(true);
-    await rejection;
-    await tick();
-    pending.shift().finish();
-    await recovery;
-    assert.equal((await loadLibrary()).feeds[0].name, 'Custom name');
-    assert.equal(stored.revision, 3);
-    // Another tab commits without sending a BroadcastChannel message. The
-    // database transaction itself must prevent this stale whole-library save.
-    stored = {revision: 4, library: {...library(), settings: {speed: 2, country: 'gb'}}};
-    await assert.rejects(saveLibrary(library()), error => error.code === 'STALE_LIBRARY');
-    assert.equal(stored.revision, 4);
-    assert.equal(stored.library.settings.country, 'gb');
-    assert.equal(pending.length, 0, 'Stale transaction never writes a snapshot');
-    assert.equal((await loadLibrary()).settings.speed, 2);
-    const afterReload = saveLibrary(library());
-    await tick();
-    assert.equal(pending[0].value.revision, 5);
-    pending.shift().finish();
-    await afterReload;
-    // Existing databases from the initial unwrapped format migrate on save.
-    stored = library();
-    assert.equal((await loadLibrary()).feeds[0].name, 'Custom name');
-    const upgrade = saveLibrary(library());
-    await tick();
-    assert.equal(pending[0].value.revision, 1);
-    pending.shift().finish();
-    await upgrade;
-  } finally {
-    database.onversionchange?.();
-    if (original === undefined) delete globalThis.indexedDB;
-    else globalThis.indexedDB = original;
-  }
+test('playback writes validate only the small progress record', async () => {
+  await assert.rejects(savePlayback({id: 'e', position: -1, duration: 30, heard: false}), /out of range/);
+  await assert.rejects(savePlayback({id: 'e', position: 1, duration: 30, heard: 'yes'}), /true or false/);
+  const episode = {id: 'e', position: 1, duration: 30, heard: false};
+  Object.defineProperty(episode, 'description', {get() { throw new Error('Must not inspect notes'); }});
+  await assert.rejects(savePlayback(episode), /storage is unavailable/);
 });
+// Transaction order, rollback, stale tabs, migration and large-library saves run
+// against real IndexedDB in storage-browser.cjs, invoked by browser.cjs.

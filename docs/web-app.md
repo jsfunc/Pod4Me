@@ -2,7 +2,7 @@
 
 An independent browser app for phones and laptops, hosted alongside the existing Android sharing page. The web app lives at **https://pod4me.aurelien-garivier.workers.dev/app/** and is deployed. The root remains the recommendation landing page; Android verifies only that root path.
 
-**The user deployed the package; public verification passed for the core app on 2026-10-31.** The live root, app HTML/JS and Android association match the prepared files. A real feed subscription and audio stream worked in Chromium through the public site. **Known deployment issue:** Apple rejected search (upstream HTTP 429) and charts (HTTP 403) from the Worker. Discovery is currently unavailable through this hosting path; RSS subscription/import and playback work. This requires a separate directory-access fix, not repeated deployment attempts.
+**Audit-fix update deployed (2026-11-01): live HTML and all five app JavaScript modules match current source byte-for-byte.** The new bundle calls Apple directly from the browser for Discover and retires the directory relay. Refresh no longer resubscribes a podcast. UTF-16/declared encodings and harmless DOCTYPE text in notes are supported; real XML DTDs remain rejected. Media RSS audio and generic enclosure MIME types are accepted. Playback saves use small records in IndexedDB version 2. The user subsequently reported “tests are ok” and accepted the update; specific device/browser results were not itemized.
 
 ## What is included
 
@@ -17,9 +17,17 @@ An independent browser app for phones and laptops, hosted alongside the existing
 
 There are **no accounts or automatic synchronization**. Feed-list files and shared links connect Android and web; their full backup formats are intentionally separate. Web backups do not contain audio. Normal browser data clearing can erase the local library; export a backup when needed. A second tab warns and requires reload when the other tab saves to avoid overwriting its changes.
 
-No offline audio downloads or automatic expiry are implemented. 4ever marks retained metadata; it does not download or protect an audio file. Playback position was small enough to include in this version. Background playback and lock-screen controls depend on the browser/device and remain subject to real iPhone testing. Some publishers' formats, HTTP media, redirects or access restrictions may prevent playback; the player shows an error.
+No offline audio downloads or automatic expiry are implemented. 4ever marks retained metadata; it does not download or protect an audio file. Background playback and lock-screen controls depend on the browser/device and remain subject to real iPhone testing. Some publishers' formats, HTTP media, redirects or access restrictions may prevent playback; the player shows an error.
 
 On iPhone/iPad, open `/app/` in Safari, then **Share → Add to Home Screen**. This does not require the App Store or an Apple developer account. It still needs an internet connection for loading the app, refreshing feeds and streaming; there is no service-worker offline cache.
+
+## Storage and intentional platform differences
+
+Playback positions, measured durations and Heard flags are stored as small episode-keyed IndexedDB records. The shared revision counter makes stale-tab writes fail atomically. Full library saves clear the overlays in the same transaction; load and backup combine them. Version 1 storage upgrades transactionally to version 2. Full validation remains on load/import and ordinary metadata saves; those less frequent operations still scale with library size. Backups keep their existing complete JSON format.
+
+Refresh preserves the previous subscription status. Subscribe, subscription import and the optional Also subscribe action explicitly change it. Web Latest intentionally includes retained episodes from unsubscribed feeds; Android Latest excludes them. Web 4ever is only a metadata marker. Neither delivered platform supports RSS 1.0/RDF end to end. Manual Refresh within the relay's five-minute cache window can return the cached feed.
+
+The web app accepts only public HTTP(S) URLs on standard ports, excluding IP literals/local hosts; Android can accept more addresses. Imported/shared unsupported addresses produce a clear error rather than being sent to an unrestricted relay. Both clients accept ordinary audio MIME types, application/ogg, generic application/octet-stream and absent MIME types; explicitly video enclosures are skipped. Media RSS fallback requires the proper namespace and an audio MIME type. Actual browser codec support still varies.
 
 ## Hosting without payment or card registration
 
@@ -43,7 +51,7 @@ Read the generated README before deploying. Use the same Cloudflare account and 
 
 The deployment helper explicitly sets `WRANGLER_CACHE_DIR` to its own `.wrangler/cache` directory. This fixes the reported permission error at the repository's `node_modules/.cache/wrangler`: that unrelated parent `node_modules` belongs to `nobody:nogroup` and is not writable by the user. The corrected helper passed `sh deploy.sh check` using cached deployment tools. No ownership changes or sudo are needed; this check does not deploy.
 
-Free usage has quotas. Static assets and API requests have different accounting; feed/directory API calls use Worker invocation/CPU allowances. A small audience is the intended trial. Large feeds and heavy use need observation after deployment; local tests cannot establish Cloudflare CPU-quota compliance. See Cloudflare's [limits](https://developers.cloudflare.com/workers/platform/limits/) and [pricing](https://developers.cloudflare.com/workers/platform/pricing/).
+Free usage has quotas. Static assets and API requests have different accounting; feed API calls use Worker invocation/CPU allowances; directory requests go directly to Apple. A small audience is the intended trial. Large feeds and heavy use need observation after deployment; local tests cannot establish Cloudflare CPU-quota compliance. See Cloudflare's [limits](https://developers.cloudflare.com/workers/platform/limits/) and [pricing](https://developers.cloudflare.com/workers/platform/pricing/).
 
 ## Why the relay exists
 
@@ -52,14 +60,14 @@ Browsers can read an external feed only if its publisher grants cross-origin per
 The Worker provides:
 
 - `/api/feed?url=…`: public HTTP(S) feed, maximum 32 MiB, 30-second upstream deadline and at most five validated redirects; response retains the publisher's charset and exposes the final URL in `X-Feed-URL`.
-- `/api/search?term=…&country=fr` and `/api/chart?country=fr`: bounded text-only directory results. Directory responses are limited to 2 MiB. Requests in a browser are spaced by at least 3.1 seconds; the chart-to-lookup chain also observes that delay.
+- Directory search/chart relay endpoints are retired (404). The browser calls Apple search, chart and lookup directly, omitting credentials/referrer, refusing redirects, bounding each response to 2 MiB with a 30-second timeout, and spacing all requests by at least 3.1 seconds. Sanitized results retain only usable public feed addresses and bounded metadata.
 - `env.ASSETS.fetch` for all other requests. Wrangler routes `/api` and `/api/*` to the Worker first; ordinary assets use static asset serving.
 
-Successful public feed responses may be cached for five minutes and directory responses for ten. A repeated Refresh can therefore use recent cached metadata. Errors are not cached. There is no per-user stored data at the relay.
+Successful public feed responses may be cached at the relay for five minutes. Directory responses have a ten-minute memory cache in the browser, capped at 40 entries. A repeated Refresh can therefore use recent cached metadata. Errors are not cached. There is no per-user stored data at the relay.
 
 The relay rejects literal IPs, localhost/private-name patterns, credentials, nonstandard ports and redirects to disallowed destinations. It strips caller credentials/cookies, limits size/time/redirects, verifies XML preambles and rejects cross-origin browser calls. These are URL-level checks, **not DNS pinning or an authenticated abuse/rate-limiting service**; nonbrowser clients can still call public endpoints. Cloudflare networking controls and quotas still apply. No audio proxy, arbitrary upstream headers, XML entity expansion or wildcard CORS is provided.
 
-Feed descriptions are rendered as inert text. XML DTDs are rejected. Backups are validated before replacement, including URLs, object structure, limits and references. Publishers receive normal media/artwork requests. Cloudflare sees feed/directory requests; Apple receives search terms/region, which can reflect liked podcast names. Individual thumbs, playback history and the library are not sent to Apple. Recommendation fragments are not sent in HTTP requests, although infrastructure can process normal request metadata.
+Feed descriptions are rendered as inert text. XML DTDs are rejected before DOM parsing; literal DOCTYPE text inside comments or CDATA is allowed. Backups are validated before replacement, including URLs, object structure, limits and references. Publishers receive normal media/artwork requests. Cloudflare sees feed requests; Apple receives the browser's IP address and search terms/region, which can reflect liked podcast names. Individual thumbs, playback history and the library are not sent to Apple. Recommendation fragments are not sent in HTTP requests, although infrastructure can process normal request metadata.
 
 ## Development and checks
 
@@ -71,6 +79,7 @@ node webapp/dev.mjs
 node webapp/tests/domain.test.mjs
 node webapp/tests/storage.test.mjs
 node webapp/tests/worker.test.mjs
+node webapp/tests/directory.test.mjs
 ```
 
 Browser regression tests use Playwright as an optional developer-only dependency:
@@ -84,7 +93,21 @@ Set `CHROMIUM_PATH` if Chromium is not at `/snap/bin/chromium`; set `POD4ME_TEST
 
 Source layout: `webapp/public/app/` holds the UI, domain logic and persistence; `webapp/worker.mjs` is the relay; `webapp/wrangler.jsonc` configures the existing Worker; `website/` holds the compatible root landing page. Keep root link syntax and asset association stable when changing either client.
 
-Real iPhone/Safari, WhatsApp handoff and browser background playback still need acceptance testing. Public Worker feed access and brief publisher playback now pass; directory access fails as noted above. Do not infer those results from a successful local Chromium test or Wrangler dry run.
+Real iPhone/Safari, WhatsApp handoff and browser background playback still need acceptance testing. The historical public Worker feed/audio checks passed; the prepared directory fix needs deployment before public availability can be claimed. Do not infer those results from a successful local Chromium test or Wrangler dry run.
+
+## Verification recorded on 2026-11-01
+
+- **42 Node tests passed:** seven domain, seven storage validation, 24 relay and four direct directory tests.
+- **Full Chromium suite passed:** subscription/refresh, actual fixture playback/history, queue/lists/bookmarks, imports/sharing, recommendation rotation, desktop/phone-width layouts, backup restore, unsubscribe persistence and explicit resubscribe, six XML parser groups, and real IndexedDB migration/order/rollback/stale-tab tests. A 100,000-episode library saved progress in 1.1 ms by writing a 59-byte record plus revision, with no full-library read or write. Ordinary metadata edits and load/backup remain proportional to library size.
+- **Live prepared-origin check passed:** fresh Chromium storage at the production HTTPS origin, with `/app/` source assets intercepted locally using `POD4ME_PREPARED_ASSETS=1`. All feed, Apple and audio requests were real. Radio France returned 22 episodes and audio played beyond one second; Apple search returned 25 results, the French chart and lookup both returned 200, and Suggest displayed eight results. This checks CORS/CSP and real requests without replacing the public deployment. The first check used an incorrect h1 test selector; the corrected h2 check and explicit chart/lookup assertions passed.
+- **Package dry run passed:** current Worker imports the shared XML helper from `public/app/xml.mjs`; Wrangler bundled it successfully with only ASSETS. No cloud storage/billing bindings. Tests/keys/APK are excluded from the web ZIP.
+- **Pending:** deploy the prepared package, verify the actual deployed bytes, then real Safari/iPhone/background/WhatsApp acceptance. The current public deployment still serves the previous bundle.
+
+To repeat the prepared-origin check without deploying:
+
+```sh
+POD4ME_PREPARED_ASSETS=1 POD4ME_TEST_URL=https://pod4me.aurelien-garivier.workers.dev PLAYWRIGHT_PATH=/tmp/pod4me-web-qa/node_modules/playwright node webapp/tests/live-smoke.cjs
+```
 
 ## Verification recorded on 2026-10-31
 
@@ -107,3 +130,7 @@ The user reported completing deployment. Public root, `/app/`, `/app/app.mjs` an
 The deployed search API returned HTTP 502 with an upstream Apple HTTP 429 error. The deployed chart API returned HTTP 502 with an upstream Apple HTTP 403 error. Local relay successes do not establish Cloudflare upstream access; Discover/search is a known live limitation pending a fix. The checks were not retried in a loop.
 
 The full ENS APK download returned HTTP 200, 29,045,117 bytes, and SHA-256 `c3fd538230cee20d655743e4aed3d90b5b524c462bc17264daad1376289bd299`, byte-identical to the signed local 1.0.11 APK. This supersedes the earlier 1.0.10 hosting snapshot. Actual iPhone, background playback, WhatsApp and Android installation checks remain pending. No source/runtime behaviour was changed during this public verification.
+
+## Publication and user acceptance, 2026-11-01
+
+After receiving deployment instructions, the user reported “tests are ok” and requested commit/push. Independent downloads confirmed that live `/app/index.html`, `app.mjs`, `domain.mjs`, `storage.mjs`, `directory.mjs` and `xml.mjs` exactly match current source. This supersedes the earlier deployment-pending notes. The public APK separately matches signed 1.0.12. The general user test report is recorded without inventing device-specific or instrumented results.

@@ -24,7 +24,7 @@ object Suggestions {
         val webLinks = Regex("https?://[^\\s<>]+", RegexOption.IGNORE_CASE).findAll(text).map { it.value }
         for (link in webLinks) {
             val uri = runCatching { URI(link) }.getOrNull() ?: continue
-            if (uri.host.equals(website.host, ignoreCase = true) && uri.rawPath == website.rawPath &&
+            if (uri.host.equals(website.host, ignoreCase = true) && uri.rawPath.orEmpty().ifEmpty { "/" } == website.rawPath.orEmpty().ifEmpty { "/" } &&
                 uri.userInfo == null && (uri.port == -1 || uri.port == if (uri.scheme.equals("https", true)) 443 else 80)) {
                 val payload = requireNotNull(uri.rawFragment) { "This link has no podcast or episode. Ask the sender to share it from Pod4Me." }
                 return parseDeep("pod4me://$payload")

@@ -63,7 +63,7 @@ test('merge preserves identity and all user state; highlights only latest discov
   assert.equal(mergeFeed(state, {...parsed, episodes: []}, parsed.url, 300).id, feed.id);
   assert.equal(state.episodes.length, 3, 'Retain missing episodes and history');
   assert.equal(first.stars, 4);
-  assert.equal(feed.subscribed, true);
+  assert.equal(feed.subscribed, false, "Refresh must not resubscribe");
 });
 
 test('suggestions exclude previous batch and subscriptions, but older dislikes can return', () => {

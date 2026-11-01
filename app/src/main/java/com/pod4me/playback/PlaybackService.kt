@@ -84,7 +84,7 @@ class PlaybackService : MediaSessionService() {
             override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
                 preferences.edit().putFloat("speed", playbackParameters.speed).apply()
             }
-            override fun onPlayerError(error: PlaybackException) { app.report(IllegalStateException("Playback failed: ${error.errorCodeName}. Try downloading this episode again.")) }
+            override fun onPlayerError(error: PlaybackException) { handlePlaybackError() }
         })
         session = MediaSession.Builder(this, player)
             .setSessionActivity(PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
@@ -179,12 +179,24 @@ class PlaybackService : MediaSessionService() {
         // so simply opening the app cannot protect an expired file from deletion.
     }
 
+    internal fun handlePlaybackError() {
+        saveProgress()
+        changing = true
+        try {
+            player.stop()
+            player.clearMediaItems()
+            started = false
+            store.activeEpisode.set(null)
+        } finally { changing = false }
+        app.report(IllegalStateException("The downloaded file could not be played. Playback has stopped. You can delete it from Library, try another episode, or retry later."))
+    }
+
     internal suspend fun markUnheard(id: String) {
         changing = true
         try {
             if (player.currentMediaItem?.mediaId == id) player.seekTo(0)
-            store.membership(id, "unheard", true)
         } finally { changing = false }
+        store.membership(id, "unheard", true)
     }
 
     /** Queue entries can survive without files after restore; choose a real file, never an empty timeline. */

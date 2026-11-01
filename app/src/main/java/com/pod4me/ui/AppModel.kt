@@ -150,8 +150,8 @@ class AppModel(application: Application) : AndroidViewModel(application) {
     fun acceptSuggestion(suggestion: Suggestion, kind: String, subscribeFeed: Boolean) = network {
         if (kind == "feed") subscribeNow(suggestion.url)
         else {
-            val feedId = if (subscribeFeed && suggestion.feedUrl != null) subscribeNow(suggestion.feedUrl) else null
-            val id = store.addSharedAudio(suggestion.url, suggestion.title, feedId)
+            if (subscribeFeed && suggestion.feedUrl != null) subscribeNow(suggestion.feedUrl)
+            val id = store.addSharedAudio(suggestion.url, suggestion.title)
             store.download(id)
         }
         mutableSuggestion.value = null
@@ -159,7 +159,10 @@ class AppModel(application: Application) : AndroidViewModel(application) {
     }
     fun clearNotice() { mutableNotice.value = null }
     private fun network(block: suspend () -> Unit) {
-        if (mutableBusy.value) return
+        if (mutableBusy.value) {
+            mutableNotice.value = "Please wait for the current operation to finish, then try again."
+            return
+        }
         mutableBusy.value = true
         action { try { block() } finally { mutableBusy.value = false } }
     }

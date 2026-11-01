@@ -121,8 +121,8 @@ Worker's request and CPU allowances. When a free limit is reached, requests
 can fail until the limit resets; this configuration does not enroll you in
 paid services. Never select an upgrade or billing setup for this package.
 The relay holds no accounts or personal libraries, proxies only bounded
-RSS/Atom and Apple podcast metadata, and caches successful metadata for
-5–10 minutes. Audio/artwork remain on their publishers' servers.
+RSS/Atom feeds, and caches successful feeds for five minutes. Discover calls
+Apple directly from the browser, with a ten-minute browser memory cache. Audio/artwork remain on their publishers' servers.
 
 IF A COMMAND FAILS
 
@@ -174,7 +174,7 @@ def main():
     parser.add_argument("--download-url", help="Override the configured public HTTPS APK URL")
     args = parser.parse_args()
     app = ROOT / "webapp/public/app"
-    required = ("index.html", "app.mjs", "app.css", "domain.mjs", "storage.mjs", "manifest.webmanifest", "icon.svg", "icon-192.png", "icon-512.png")
+    required = ("index.html", "app.mjs", "app.css", "domain.mjs", "storage.mjs", "directory.mjs", "xml.mjs", "manifest.webmanifest", "icon.svg", "icon-192.png", "icon-512.png")
     missing = [name for name in required if not (app / name).is_file()]
     if missing:
         parser.error("Web app files are missing; finish the app before packaging: " + ", ".join(missing))

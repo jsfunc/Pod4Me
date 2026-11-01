@@ -3,6 +3,9 @@ import {emptyLibrary, safeUrl} from './domain.mjs';
 const DB_NAME = 'pod4me-web';
 const STORE_NAME = 'library';
 const CURRENT_KEY = 'current';
+const REVISION_KEY = 'revision';
+const PLAYBACK_STORE = 'playback';
+let episodeIds = new Set();
 let databasePromise;
 let writeTail = Promise.resolve();
 let expectedRevision = 0;
@@ -21,11 +24,19 @@ function openDatabase() {
       return;
     }
     let request;
-    try { request = indexedDB.open(DB_NAME, 1); }
+    try { request = indexedDB.open(DB_NAME, 2); }
     catch (error) { reject(storageError('Browser storage could not be opened.', error)); return; }
     let abandoned = false;
     request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains(STORE_NAME)) request.result.createObjectStore(STORE_NAME);
+      const db = request.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) db.createObjectStore(STORE_NAME);
+      if (!db.objectStoreNames.contains(PLAYBACK_STORE)) db.createObjectStore(PLAYBACK_STORE, {keyPath: 'id'});
+      const store = request.transaction.objectStore(STORE_NAME);
+      const read = store.get(CURRENT_KEY);
+      read.onsuccess = () => {
+        try { store.put(storedRecord(read.result).revision, REVISION_KEY); }
+        catch { request.transaction.abort(); }
+      };
     };
     request.onblocked = () => {
       abandoned = true;
@@ -43,34 +54,37 @@ function openDatabase() {
   return databasePromise;
 }
 
-function transactionValue(database, mode, operation) {
-  return new Promise((resolve, reject) => {
-    let transaction, value;
-    try {
-      transaction = database.transaction(STORE_NAME, mode);
-      const request = operation(transaction.objectStore(STORE_NAME));
-      request.onsuccess = () => { value = request.result; };
-      request.onerror = () => { /* The transaction abort reports the failure. */ };
-      transaction.oncomplete = () => resolve(value);
-      transaction.onabort = () => reject(storageError(mode === 'readonly' ? 'Your library could not be read from browser storage.' : 'Your changes could not be saved. Browser storage may be full or unavailable. Export a backup before closing this page.', transaction.error || request.error));
-      transaction.onerror = () => { /* onabort is the definitive transaction result. */ };
-    } catch (error) {
-      reject(storageError(mode === 'readonly' ? 'Your library could not be read from browser storage.' : 'Your changes could not be saved to browser storage.', error));
-    }
-  });
-}
-
 export async function loadLibrary() {
   await writeTail;
   const database = await openDatabase();
-  const stored = await transactionValue(database, 'readonly', store => store.get(CURRENT_KEY));
-  try {
-    const record = storedRecord(stored);
-    const library = record.library === undefined ? emptyLibrary() : validateLibrary(record.library);
-    expectedRevision = record.revision;
-    return library;
-  }
-  catch (error) { throw storageError(`The saved library could not be read safely: ${error.message} Existing browser data has not been overwritten.`, error); }
+  return new Promise((resolve, reject) => {
+    let transaction, library, revision;
+    try {
+      transaction = database.transaction([STORE_NAME, PLAYBACK_STORE], 'readonly');
+      const store = transaction.objectStore(STORE_NAME);
+      const read = store.get(CURRENT_KEY), version = store.get(REVISION_KEY);
+      const progress = transaction.objectStore(PLAYBACK_STORE).getAll();
+      transaction.oncomplete = () => {
+        try {
+          const record = storedRecord(read.result);
+          library = record.library === undefined ? emptyLibrary() : validateLibrary(record.library);
+          revision = version.result;
+          if (!Number.isSafeInteger(revision) || revision < 0) throw new Error('Invalid storage revision.');
+          const episodes = new Map(library.episodes.map(episode => [episode.id, episode]));
+          for (const value of progress.result) {
+            const saved = playbackRecord(value), episode = episodes.get(saved.id);
+            if (!episode) throw new Error('Saved playback refers to an unknown episode.');
+            Object.assign(episode, saved);
+          }
+          expectedRevision = revision;
+          episodeIds = new Set(episodes.keys());
+          resolve(library);
+        } catch (error) { reject(storageError(`The saved library could not be read safely: ${error.message} Existing browser data has not been overwritten.`, error)); }
+      };
+      transaction.onabort = () => reject(storageError('Your library could not be read from browser storage.', transaction.error));
+      transaction.onerror = () => {};
+    } catch (error) { reject(storageError('Your library could not be read from browser storage.', error)); }
+  });
 }
 
 function storedRecord(stored) {
@@ -82,17 +96,18 @@ function storedRecord(stored) {
   return stored;
 }
 
-function commitSnapshot(database, snapshot) {
+function commit(database, snapshot, progress) {
   return new Promise((resolve, reject) => {
     let transaction, failure, nextRevision;
     try {
-      transaction = database.transaction(STORE_NAME, 'readwrite');
+      transaction = database.transaction([STORE_NAME, PLAYBACK_STORE], 'readwrite');
       const store = transaction.objectStore(STORE_NAME);
-      const read = store.get(CURRENT_KEY);
+      const playback = transaction.objectStore(PLAYBACK_STORE);
+      // Reading this tiny key never clones the full library during playback.
+      const read = store.get(REVISION_KEY);
       read.onsuccess = () => {
         try {
-          const record = storedRecord(read.result);
-          if (record.revision !== expectedRevision) {
+          if (read.result !== expectedRevision) {
             failure = storageError('Your library changed in another tab. Reload this tab before making more changes.');
             failure.code = 'STALE_LIBRARY';
             transaction.abort();
@@ -100,28 +115,48 @@ function commitSnapshot(database, snapshot) {
           }
           nextRevision = expectedRevision + 1;
           if (!Number.isSafeInteger(nextRevision)) throw storageError('The browser storage revision is out of range.');
-          store.put({revision: nextRevision, library: snapshot}, CURRENT_KEY);
+          if (snapshot) {
+            store.put({revision: nextRevision, library: snapshot}, CURRENT_KEY);
+            playback.clear();
+          } else {
+            if (!episodeIds.has(progress.id)) throw storageError('The episode is no longer in this library.');
+            playback.put(progress);
+          }
+          store.put(nextRevision, REVISION_KEY);
         } catch (error) { failure = error; transaction.abort(); }
       };
-      transaction.oncomplete = () => { expectedRevision = nextRevision; resolve(); };
-      transaction.onabort = () => reject(failure || storageError('Your changes could not be saved. Browser storage may be full or unavailable. Export a backup before closing this page.', transaction.error || read.error));
-      transaction.onerror = () => { /* onabort reports the definitive failure. */ };
+      transaction.oncomplete = () => {
+        expectedRevision = nextRevision;
+        if (snapshot) episodeIds = new Set(snapshot.episodes.map(episode => episode.id));
+        resolve();
+      };
+      transaction.onabort = () => reject(failure?.code === 'STALE_LIBRARY' ? failure : storageError('Your changes could not be saved. Browser storage may be full or unavailable. Export a backup before closing this page.', failure || transaction.error || read.error));
+      transaction.onerror = () => {};
     } catch (error) { reject(storageError('Your changes could not be saved to browser storage.', error)); }
   });
 }
 
-// Take the snapshot before waiting for earlier writes. Every caller receives its
-// own failure, while a failed transaction does not prevent a later save attempt.
-export function saveLibrary(state) {
-  let snapshot;
-  try { snapshot = validateLibrary(state); }
-  catch (error) { return Promise.reject(storageError(`Your library could not be prepared for saving: ${error.message}`, error)); }
-  const write = writeTail.then(async () => {
-    const database = await openDatabase();
-    await commitSnapshot(database, snapshot);
-  });
+function enqueueWrite(snapshot, progress) {
+  const write = writeTail.then(async () => commit(await openDatabase(), snapshot, progress));
   writeTail = write.catch(() => {});
   return write;
+}
+
+// Snapshot at the call boundary so later mutations cannot overtake queued saves.
+export function saveLibrary(state) {
+  try { return enqueueWrite(validateLibrary(state)); }
+  catch (error) { return Promise.reject(storageError(`Your library could not be prepared for saving: ${error.message}`, error)); }
+}
+
+function playbackRecord(value) {
+  record(value, 'playback');
+  return {id: id(value.id, 'episode ID'), position: number(value.position, 'playback position'),
+    duration: number(value.duration, 'episode duration'), heard: boolean(value.heard, 'heard status')};
+}
+
+export function savePlayback(episode) {
+  try { return enqueueWrite(undefined, playbackRecord(episode)); }
+  catch (error) { return Promise.reject(storageError(`Playback could not be saved: ${error.message}`, error)); }
 }
 
 function fail(message) { throw new Error(`Invalid backup: ${message}`); }

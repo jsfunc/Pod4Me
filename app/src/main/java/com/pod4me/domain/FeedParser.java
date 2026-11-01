@@ -6,6 +6,8 @@ import java.io.IOException;
 import java.net.URI;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
+import java.time.temporal.ChronoField;
 import java.util.*;
 import javax.xml.parsers.SAXParserFactory;
 import org.xml.sax.Attributes;
@@ -15,6 +17,9 @@ import org.xml.sax.ext.DefaultHandler2;
 
 /** RSS 2.0 and Atom parser. Only enclosure URLs are treated as playable audio. */
 public final class FeedParser {
+    public static final int MAX_TITLE_CHARS = 4096;
+    public static final int MAX_DESCRIPTION_CHARS = 1_048_576;
+    private static final String SHORTENED = "\n[Show notes shortened because they exceed the size limit.]";
     public static final int MAX_BYTES = 64 * 1024 * 1024;
     public record Item(String guid, String title, String audioUrl, String description, long published, long duration) {}
     public record Feed(String title, List<Item> items, String artworkUrl, int skippedItems) {
@@ -66,6 +71,7 @@ public final class FeedParser {
     private static final class FeedHandler extends DefaultHandler2 {
         private static final String ATOM = "http://www.w3.org/2005/Atom";
         private static final String ITUNES = "http://www.itunes.com/dtds/podcast-1.0.dtd";
+        private static final String MEDIA = "http://search.yahoo.com/mrss/";
         private static final String CONTENT = "http://purl.org/rss/1.0/modules/content/";
         private static final Set<String> ITEM_FIELDS = Set.of("guid", "id", "title", "encoded", "content", "description", "summary", "pubDate", "published", "updated", "duration");
         private final String source;
@@ -76,6 +82,9 @@ public final class FeedParser {
         private boolean atom, sawChannel, inChannel;
         private int depth, channelDepth, entryDepth, imageDepth, captureDepth, skippedItems;
         private String rssNamespace = "";
+        private String mediaAudio = "";
+        private boolean truncated;
+        private int captureLimit;
         private String audio = "", hrefImage = "", rssImage = "", field;
         private StringBuilder capture;
 
@@ -101,12 +110,17 @@ public final class FeedParser {
                 channelDepth = 2; sawChannel = inChannel = true;
             }
             if (!inChannel) return;
+            if (entry != null && MEDIA.equals(uri) && name.equals("content") && mediaAudio.isEmpty()) {
+                String type = attributes.getValue("type");
+                if (type != null && type.toLowerCase(Locale.ROOT).startsWith("audio/"))
+                    mediaAudio = resolve(source, attributes.getValue("url"));
+            }
             if (depth == channelDepth + 1 && name.equals(atom ? "entry" : "item") && canonical(uri)) {
-                entry = new HashMap<>(); entryDepth = depth; audio = "";
+                entry = new HashMap<>(); entryDepth = depth; audio = ""; mediaAudio = "";
             } else if (entry != null && depth == entryDepth + 1) {
                 if (audio.isEmpty() && canonical(uri) && ((!atom && name.equals("enclosure")) || (atom && name.equals("link") && "enclosure".equals(attributes.getValue("rel"))))) {
-                    String type = attributes.getValue("type");
-                    if (type == null || type.isEmpty() || type.startsWith("audio/") || type.equals("application/octet-stream"))
+                    String type = Optional.ofNullable(attributes.getValue("type")).orElse("").split(";", 2)[0].trim().toLowerCase(Locale.ROOT);
+                    if (type.isEmpty() || type.startsWith("audio/") || type.equals("application/octet-stream") || type.equals("application/ogg"))
                         audio = resolve(source, attributes.getValue(atom ? "href" : "url"));
                 }
                 if (canonical(uri) && ITEM_FIELDS.contains(name) && !name.equals("encoded") && !name.equals("duration")) beginCapture(name);
@@ -123,12 +137,30 @@ public final class FeedParser {
         // RSS publishers sometimes put the whole document in a default namespace.
         // Match that document namespace, while keeping extension fields separate.
         private boolean canonical(String uri) { return atom ? ATOM.equals(uri) : rssNamespace.equals(uri); }
-        private void beginCapture(String name) { field = name; captureDepth = depth; capture = new StringBuilder(); }
+        private boolean descriptionField(String name) { return Set.of("encoded", "content", "description", "summary", "itunes:summary").contains(name); }
+        private void beginCapture(String name) {
+            field = name; captureDepth = depth; capture = new StringBuilder(); truncated = false;
+            captureLimit = descriptionField(name) ? MAX_DESCRIPTION_CHARS : name.endsWith("title") ? MAX_TITLE_CHARS : 65536;
+        }
         @Override public void characters(char[] chars, int start, int length) {
-            if (capture != null) capture.append(chars, start, length);
+            if (capture != null) {
+                int remaining = captureLimit - capture.length();
+                capture.append(chars, start, Math.min(length, remaining));
+                if (length > remaining) {
+                    if (!descriptionField(field) && !field.endsWith("title")) throw new IllegalArgumentException("A feed identifier or metadata field exceeds the size limit");
+                    truncated = true;
+                }
+            }
         }
         @Override public void endElement(String uri, String localName, String qName) {
             if (capture != null && depth == captureDepth) {
+                if (truncated) {
+                    String suffix = descriptionField(field) ? SHORTENED : "…";
+                    int end = captureLimit - suffix.length();
+                    if (end > 0 && Character.isHighSurrogate(capture.charAt(end - 1))) end--;
+                    capture.setLength(end);
+                    capture.append(suffix);
+                }
                 String value = capture.toString().trim();
                 if (entry != null) entry.putIfAbsent(field, value);
                 else if (field.equals("imageUrl")) { if (rssImage.isEmpty()) rssImage = resolve(source, value); }
@@ -141,6 +173,7 @@ public final class FeedParser {
             depth--;
         }
         private void finishEntry() {
+            if (audio.isEmpty()) audio = mediaAudio;
             if (audio.isEmpty()) { skippedItems++; return; }
             String guid = entry.getOrDefault(atom ? "id" : "guid", "");
             if (guid.isEmpty()) guid = audio;
@@ -166,7 +199,7 @@ public final class FeedParser {
     }
 
     private static String resolve(String source, String ref) {
-        if (ref == null || ref.isBlank()) return "";
+        if (ref == null || ref.isBlank() || ref.length() > 65536) return "";
         try { return httpUrl(URI.create(source).resolve(escapeReference(ref.trim())).toString()); } catch (IllegalArgumentException e) { return ""; }
     }
     private static String escapeReference(String value) {
@@ -197,6 +230,18 @@ public final class FeedParser {
         if (offset != null) value = value.substring(0, lastSpace + 1) + offset;
         try { return Instant.parse(value).toEpochMilli(); } catch (Exception ignored) {}
         try { return OffsetDateTime.parse(value).toInstant().toEpochMilli(); } catch (Exception ignored) {}
+        // RFC 822 two-digit years: 70–99 = 1970–1999; 00–69 = 2000–2069.
+        // Ignore the optional weekday for tolerant publisher/localised dates.
+        String withoutWeekday = value.replaceFirst("^[^,0-9]+,\\s*", "");
+        for (Locale locale : List.of(Locale.US, Locale.FRENCH)) {
+            for (boolean reduced : List.of(false, true)) {
+                var builder = new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("d MMM ");
+                if (reduced) builder.appendValueReduced(ChronoField.YEAR, 2, 2, 1970);
+                else builder.appendPattern("uuuu");
+                var format = builder.appendPattern(" HH:mm:ss Z").toFormatter(locale);
+                try { return OffsetDateTime.parse(withoutWeekday, format).toInstant().toEpochMilli(); } catch (Exception ignored) {}
+            }
+        }
         for (DateTimeFormatter f : List.of(DateTimeFormatter.RFC_1123_DATE_TIME,
                 DateTimeFormatter.ofPattern("EEE, d MMM yyyy HH:mm:ss Z", Locale.US),
                 DateTimeFormatter.ofPattern("d MMM yyyy HH:mm:ss Z", Locale.US))) {
