@@ -15,10 +15,16 @@ import kotlinx.coroutines.flow.asStateFlow
 
 data class PlaybackUi(val connected: Boolean = false, val id: String? = null, val playing: Boolean = false,
     val position: Long = 0, val duration: Long = 0, val speed: Float = 1f, val hasNext: Boolean = false, val hasPrevious: Boolean = false,
-    val buffering: Boolean = false, val radioName: String? = null, val videoAspectRatio: Float = 16f / 9f)
+    val buffering: Boolean = false, val radioName: String? = null, val videoAspectRatio: Float = 16f / 9f, val canSeek: Boolean = false, val liveOffset: Long = 0)
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-class PlayerClient(private val app: PodApplication) {
+class PlayerClient internal constructor(
+    private val app: PodApplication,
+    private val createController: () -> ListenableFuture<MediaController>,
+) {
+    constructor(app: PodApplication) : this(app, {
+        MediaController.Builder(app, SessionToken(app, ComponentName(app, PlaybackService::class.java))).buildAsync()
+    })
     private var future: ListenableFuture<MediaController>? = null
     private var controller: MediaController? = null
     val videoPlayer: Player? get() = controller
@@ -29,7 +35,7 @@ class PlayerClient(private val app: PodApplication) {
     }
     fun connect() {
         if (future != null) return
-        val pending = MediaController.Builder(app, SessionToken(app, ComponentName(app, PlaybackService::class.java))).buildAsync()
+        val pending = createController()
         future = pending
         pending.addListener({
             if (future === pending) try {
@@ -39,6 +45,10 @@ class PlayerClient(private val app: PodApplication) {
         }, ContextCompat.getMainExecutor(app))
     }
     fun disconnect() {
+        // ON_STOP precedes Compose's view disposal during rotation. Detach while the
+        // controller is still connected: releaseFuture alone leaves the service rendering
+        // to the old TextureView, whose SurfaceTexture Android is about to destroy.
+        controller?.clearVideoSurface()
         controller?.removeListener(listener)
         future?.let(MediaController::releaseFuture)
         future = null; controller = null
@@ -48,11 +58,11 @@ class PlayerClient(private val app: PodApplication) {
         val p = controller ?: return
         val live = com.pod4me.domain.RadioStation.isRadio(p.currentMediaItem?.mediaId)
         mutableState.value = PlaybackUi(true, p.currentMediaItem?.mediaId,
-            p.playWhenReady && p.playbackState != Player.STATE_ENDED && p.playerError == null, if (live) 0 else p.currentPosition,
-            if (live) 0 else p.duration.coerceAtLeast(0), p.playbackParameters.speed, p.hasNextMediaItem(), p.hasPreviousMediaItem(),
+            p.playWhenReady && p.playbackState != Player.STATE_ENDED && p.playerError == null, p.currentPosition.coerceAtLeast(0),
+            p.duration.coerceAtLeast(0), p.playbackParameters.speed, p.hasNextMediaItem(), p.hasPreviousMediaItem(),
             p.playbackState == Player.STATE_BUFFERING,
             p.currentMediaItem?.mediaMetadata?.title?.toString().takeIf { live },
-            p.videoSize.let { if (it.width > 0 && it.height > 0) it.width * it.pixelWidthHeightRatio / it.height else 16f / 9f })
+            p.videoSize.let { if (it.width > 0 && it.height > 0) it.width * it.pixelWidthHeightRatio / it.height else 16f / 9f }, p.isCurrentMediaItemSeekable, p.currentLiveOffset.coerceAtLeast(0))
     }
     fun play(id: String, order: List<String>, position: Long = -1) {
         val args = Bundle().apply { putString("id", id); putStringArrayList("order", ArrayList(order)); putLong("position", position) }
@@ -76,6 +86,7 @@ class PlayerClient(private val app: PodApplication) {
         }, ContextCompat.getMainExecutor(app))
     }
     fun seek(position: Long) { requireController().seekTo(position.coerceAtLeast(0)) }
+    fun goLive() { requireController().seekToDefaultPosition(); requireController().play() }
     fun back() { requireController().seekBack() }
     fun forward() { requireController().seekForward() }
     fun previous() { requireController().seekToPreviousMediaItem() }

@@ -20,6 +20,23 @@ import java.io.File
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = Application::class)
 class LibraryStoreTest {
+    @Test fun youtubeSubscriptionsRoundTripAndDoNotCreateEpisodesOrReturnAfterUnsubscribe() = runBlocking {
+        val before = store.library.value.episodes.size
+        store.seedYouTubeChannel()
+        val channel = store.library.value.subscriptions.single { it.isYouTube }
+        assertEquals(YouTubeChannels.WAATH_NAME, channel.name)
+        val id = store.subscribeYouTube("https://m.youtube.com/@WEAREATHLETIC_WAATH/videos?si=123", "Another name")
+        assertEquals(channel.id, id)
+        assertEquals(channel.name, store.library.value.subscriptions.single { it.isYouTube }.name)
+        val output = java.io.ByteArrayOutputStream(); store.exportLibrary(output)
+        store.unsubscribe(id)
+        store.seedYouTubeChannel()
+        assertTrue(store.library.value.subscriptions.none { it.isYouTube })
+        store.restoreLibrary(output.toByteArray().inputStream())
+        assertEquals(channel.url, store.library.value.subscriptions.single { it.isYouTube }.url)
+        assertEquals(before, store.library.value.episodes.size)
+    }
+
     @Test fun videoSamplesAreAvailableOnceAndUnsubscribeStaysRemoved() = runBlocking {
         store.seedVideoSamples()
         val samples = store.library.value.subscriptions.filter { it.id != episode.feedId }

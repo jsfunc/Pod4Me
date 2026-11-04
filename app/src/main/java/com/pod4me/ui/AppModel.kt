@@ -55,7 +55,7 @@ class AppModel(application: Application) : AndroidViewModel(application) {
         catch (e: Exception) { app.report(e) }
     } }
     suspend fun onLaunch() {
-        try { store.initialize(); store.seedVideoSamples(); app.radios.read(); store.reconcileDownloads(); store.expireAtLaunch(); updateStorage() }
+        try { store.initialize(); store.seedVideoSamples(); store.seedYouTubeChannel(); app.radios.read(); store.reconcileDownloads(); store.expireAtLaunch(); updateStorage() }
         catch (e: Exception) { app.report(e) }
     }
     private suspend fun updateStorage() = withContext(Dispatchers.IO) {
@@ -64,7 +64,7 @@ class AppModel(application: Application) : AndroidViewModel(application) {
         mutableStorage.value = StorageUi((bytes / 1e9).roundToLong(), (StatFs(directory.absolutePath).availableBytes / 1e9).roundToLong())
     }
     fun refresh(feed: Feed? = null) = network {
-        val targets = (feed?.let(::listOf) ?: library.value.subscriptions).filter { it.subscribed && it.url.isNotBlank() }
+        val targets = (feed?.let(::listOf) ?: library.value.subscriptions).filter { it.subscribed && it.url.isNotBlank() && !it.isYouTube }
         val failures = mutableListOf<String>()
         for (target in targets) {
             try { store.saveFeed(target.url, app.feeds.fetch(target.url), target.id) }
@@ -73,7 +73,7 @@ class AppModel(application: Application) : AndroidViewModel(application) {
         }
         if (failures.isNotEmpty()) mutableNotice.value = "Refresh failed: ${failures.joinToString()}"
     }
-    fun subscribe(url: String) = network { subscribeNow(url); mutableNotice.value = "Feed added" }
+    fun subscribe(url: String) = network { subscribeNow(url); mutableNotice.value = "Subscription added" }
     fun discover() = network {
         val generation = mutableDiscovery.value.generation + 1
         mutableDiscovery.value = DiscoveryUi(generation, loading = true)
@@ -93,7 +93,8 @@ class AppModel(application: Application) : AndroidViewModel(application) {
     fun rateRecommendation(item: PodcastRecommendation, vote: Int) = action {
         app.discoveryPreferences.rate(item, vote)
     }
-    private suspend fun subscribeNow(url: String): String {
+    private suspend fun subscribeNow(url: String, title: String? = null): String {
+        if (YouTubeChannels.isYouTube(url)) return store.subscribeYouTube(url, title)
         val normalized = FeedParser.httpUrl(url.trim())
         return store.saveFeed(normalized, app.feeds.fetch(normalized))
     }
@@ -110,8 +111,11 @@ class AppModel(application: Application) : AndroidViewModel(application) {
         var added = 0; var skipped = 0
         val failed = mutableListOf<String>()
         for (url in urls) {
-            if (library.value.subscriptions.any { it.url == url }) { skipped++; continue }
-            try { subscribeNow(url); added++ }
+            try {
+                val normalized = if (YouTubeChannels.isYouTube(url)) YouTubeChannels.normalize(url) else FeedParser.httpUrl(url)
+                if (library.value.subscriptions.any { it.url == normalized }) { skipped++; continue }
+                subscribeNow(normalized, YouTubeChannels.importedName(text, url)); added++
+            }
             catch (e: CancellationException) { throw e }
             catch (e: Exception) { failed += "$url: ${e.message}" }
         }

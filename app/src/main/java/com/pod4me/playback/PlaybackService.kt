@@ -5,6 +5,9 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import androidx.media3.common.*
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.*
 import com.google.common.collect.ImmutableList
@@ -42,11 +45,14 @@ class PlaybackService : MediaSessionService() {
     private val operations = Mutex()
     private var streamingVideo = false
     private var liveStation: RadioStation? = null
-    private var reconnectLive = false
+    @Volatile private var radioBuffer: RadioBuffer? = null
+    internal var createRadioBuffer: (RadioStation) -> RadioBuffer = { RadioBuffer(cacheDir, it.url) }
 
     override fun onCreate() {
         super.onCreate()
-        player = ExoPlayer.Builder(this).setSeekBackIncrementMs(10_000).setSeekForwardIncrementMs(10_000).build()
+        val fallback = DefaultDataSource.Factory(this)
+        val sources = DefaultMediaSourceFactory(this).setDataSourceFactory(DataSource.Factory { RadioDataSource(fallback) { radioBuffer } })
+        player = ExoPlayer.Builder(this).setMediaSourceFactory(sources).setSeekBackIncrementMs(10_000).setSeekForwardIncrementMs(10_000).build()
         player.setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_SPEECH).build(), true)
         player.setHandleAudioBecomingNoisy(true)
         player.setWakeMode(C.WAKE_MODE_LOCAL)
@@ -82,25 +88,19 @@ class PlaybackService : MediaSessionService() {
                 scope.launch { safely { operations.withLock { store.removeFromQueue(id); rebuildUpcoming() } } }
             }
             override fun onIsPlayingChanged(isPlaying: Boolean) { if (!changing) saveProgress() }
-            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-                val station = liveStation ?: return
-                if (changing) return
-                if (!playWhenReady) reconnectLive = true
-                else if (reconnectLive) {
-                    // A headset/system resume rejoins the live broadcast rather than an old buffer.
-                    reconnectLive = false
-                    changing = true
-                    try { player.setMediaItem(radioItem(station)); player.prepare() }
-                    finally { changing = false }
-                }
-            }
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_ENDED) saveProgress()
             }
             override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
                 if (liveStation == null && !changing) preferences.edit().putFloat("speed", playbackParameters.speed).apply()
             }
-            override fun onPlayerError(error: PlaybackException) { handlePlaybackError() }
+            override fun onPlayerError(error: PlaybackException) {
+                if (liveStation != null && error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
+                    // Pausing longer than the retained window resumes at the oldest available audio.
+                    player.seekTo(0)
+                    player.prepare()
+                } else handlePlaybackError()
+            }
         })
         session = MediaSession.Builder(this, player)
             .setSessionActivity(PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
@@ -117,6 +117,7 @@ class PlaybackService : MediaSessionService() {
                                 store.initialize()
                                 val station = savedRadio()
                                 if (station != null) {
+                                    replaceRadioBuffer(station)
                                     streamingVideo = false
                                     liveStation = station
                                     started = true
@@ -165,8 +166,8 @@ class PlaybackService : MediaSessionService() {
                                 TOGGLE -> togglePlayback()
                                 PLAY_QUEUE -> startQueue()
                                 STOP -> stopPlayback()
-                                BACK10 -> if (liveStation == null) player.seekBack()
-                                FORWARD10 -> if (liveStation == null) player.seekForward()
+                                BACK10 -> player.seekBack()
+                                FORWARD10 -> player.seekForward()
                                 else -> error("Unknown playback command")
                             } }
                             result.set(SessionResult(SessionResult.RESULT_SUCCESS))
@@ -200,7 +201,7 @@ class PlaybackService : MediaSessionService() {
             started = false
             liveStation = null
             streamingVideo = false
-            reconnectLive = false
+            closeRadioBuffer()
             store.activeEpisode.set(null)
         } finally { changing = false }
         updateControls()
@@ -223,7 +224,7 @@ class PlaybackService : MediaSessionService() {
             player.stop()
             streamingVideo = false
             liveStation = station
-            reconnectLive = false
+            replaceRadioBuffer(station)
             store.activeEpisode.set(null)
             started = true
             player.setWakeMode(C.WAKE_MODE_NETWORK)
@@ -244,7 +245,7 @@ class PlaybackService : MediaSessionService() {
             player.stop(); player.clearMediaItems()
             liveStation = null
             streamingVideo = false
-            reconnectLive = false
+            closeRadioBuffer()
             started = false
             store.activeEpisode.set(null)
         } finally { changing = false }
@@ -254,12 +255,19 @@ class PlaybackService : MediaSessionService() {
         updateControls()
     }
 
-    private fun radioItem(station: RadioStation) = MediaItem.Builder().setMediaId(station.id).setUri(station.url)
+    private fun closeRadioBuffer() { radioBuffer?.close(); radioBuffer = null }
+    private fun replaceRadioBuffer(station: RadioStation) {
+        closeRadioBuffer()
+        radioBuffer = createRadioBuffer(station)
+    }
+    private fun radioItem(station: RadioStation) = MediaItem.Builder().setMediaId(station.id).setUri(requireNotNull(radioBuffer).uri)
+        .setLiveConfiguration(MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(4000)
+            .setMinPlaybackSpeed(1f).setMaxPlaybackSpeed(1f).build())
         .setMediaMetadata(MediaMetadata.Builder().setTitle(station.name).setArtist("Live radio").setIsPlayable(true).build()).build()
 
     private fun sessionCommands(controller: MediaSession.ControllerInfo): SessionCommands {
         val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
-        if (liveStation == null) commands.add(SessionCommand(BACK10, Bundle.EMPTY)).add(SessionCommand(FORWARD10, Bundle.EMPTY))
+        commands.add(SessionCommand(BACK10, Bundle.EMPTY)).add(SessionCommand(FORWARD10, Bundle.EMPTY))
         if (controller.packageName == packageName) listOf(START, START_RADIO, STREAM_VIDEO, STOP, MARK_UNHEARD, TOGGLE, PLAY_QUEUE).forEach {
             commands.add(SessionCommand(it, Bundle.EMPTY))
         }
@@ -269,8 +277,7 @@ class PlaybackService : MediaSessionService() {
     internal fun playerCommands(): Player.Commands {
         val commands = MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
             .remove(Player.COMMAND_SET_MEDIA_ITEM).remove(Player.COMMAND_CHANGE_MEDIA_ITEMS)
-        if (liveStation != null) listOf(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM, Player.COMMAND_SEEK_TO_DEFAULT_POSITION,
-            Player.COMMAND_SEEK_BACK, Player.COMMAND_SEEK_FORWARD, Player.COMMAND_SEEK_TO_PREVIOUS,
+        if (liveStation != null) listOf(Player.COMMAND_SEEK_TO_PREVIOUS,
             Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM, Player.COMMAND_SEEK_TO_NEXT, Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
             Player.COMMAND_SEEK_TO_MEDIA_ITEM, Player.COMMAND_SET_SPEED_AND_PITCH).forEach(commands::remove)
         return commands.build()
@@ -286,7 +293,7 @@ class PlaybackService : MediaSessionService() {
     private fun updateControls() {
         val current = session ?: return
         current.connectedControllers.forEach { current.setAvailableCommands(it, sessionCommands(it), playerCommands()) }
-        current.setMediaButtonPreferences(if (liveStation != null) emptyList() else podcastButtons())
+        current.setMediaButtonPreferences(podcastButtons())
     }
 
     internal suspend fun markUnheard(id: String) {
@@ -326,7 +333,11 @@ class PlaybackService : MediaSessionService() {
             player.pause()
             return
         }
-        liveStation?.let { startRadio(it.id); return }
+        if (liveStation != null) {
+            if (player.playbackState == Player.STATE_IDLE) player.prepare()
+            player.play()
+            return
+        }
         if (player.currentMediaItem == null) {
             savedRadio()?.let { startRadio(it.id); return }
             val (id, order) = resumeSelection()
@@ -354,7 +365,7 @@ class PlaybackService : MediaSessionService() {
         try {
             player.stop()
             liveStation = null
-            reconnectLive = false
+            closeRadioBuffer()
             streamingVideo = true
             started = true
             preferences.edit().remove("radio").apply()
@@ -380,7 +391,7 @@ class PlaybackService : MediaSessionService() {
             player.pause()
             liveStation = null
             streamingVideo = false
-            reconnectLive = false
+            closeRadioBuffer()
             preferences.edit().remove("radio").apply()
             player.setWakeMode(C.WAKE_MODE_LOCAL)
             player.setPlaybackSpeed(preferences.getFloat("speed", 1f).coerceIn(1f, 3f))
@@ -458,6 +469,7 @@ class PlaybackService : MediaSessionService() {
         val epoch = id?.let(store::progressEpoch) ?: 0L
         if (id != null && !RadioStation.isRadio(id)) app.scope.launch { try { store.progress(id, position, duration, epoch) } catch (e: Exception) { app.report(e) } }
         store.activeEpisode.set(null)
+        closeRadioBuffer()
         session?.release(); player.release(); scope.cancel()
         super.onDestroy()
     }

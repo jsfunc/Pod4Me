@@ -145,7 +145,7 @@ fun PodApp(model: AppModel) {
                                 FilterChip(selected = filter == "all", onClick = { filter = "all" }, label = { Text("All") })
                                 library.lists.forEach { list -> FilterChip(selected = filter == list.id, onClick = { filter = list.id }, label = { Text(list.name) }) }
                                 FilterChip(selected = filter == "starred", onClick = { filter = "starred"; sort = TrackSort.STARS }, label = { Text("Starred") })
-                                library.feeds.filter { feed -> feed.subscribed || (library.downloadCounts[feed.id] ?: 0) > 0 }
+                                library.feeds.filter { feed -> !feed.isYouTube && (feed.subscribed || (library.downloadCounts[feed.id] ?: 0) > 0) }
                                     .forEach { feed -> FilterChip(selected = filter == "feed:${feed.id}", onClick = { filter = "feed:${feed.id}" }, label = { Text(feed.name) }) }
                             }
                         } else {
@@ -232,15 +232,19 @@ fun PodApp(model: AppModel) {
             text = { Text("This merges subscriptions, lists, ratings, progress, bookmarks and queue into this library. Backup values replace matching feed settings, ratings and progress; memberships are combined. Existing audio is kept. Missing audio is not downloaded automatically. Stop playback before restoring.") },
             confirmButton = { TextButton(enabled = !busy, onClick = { model.restoreLibrary(uri); restoreUri = null }) { Text("Restore") } },
             dismissButton = { TextButton(onClick = { restoreUri = null }) { Text("Cancel") } }) }
-        if (showAddFeed) TextInputDialog("Subscribe to a podcast", "RSS feed URL", "", "Subscribe", busy,
+        if (showAddFeed) TextInputDialog("Add subscription", "RSS feed or YouTube channel URL", "", "Subscribe", busy,
             onDismiss = { showAddFeed = false }, onSave = { model.subscribe(it); showAddFeed = false })
-        editingFeed?.let { feed -> FeedEditDialog(feed, library.lists, positions, onDismiss = { editingFeed = null }) { name, days, defaults ->
+        editingFeed?.let { feed -> if (feed.isYouTube) TextInputDialog("Rename YouTube channel", "Channel name", feed.name, "Save", busy,
+            onDismiss = { editingFeed = null }, onSave = { name -> model.action {
+                model.store.editFeed(feed.id, name, feed.expiryDays, feed.defaults); editingFeed = null
+            } }) else FeedEditDialog(feed, library.lists, positions, onDismiss = { editingFeed = null }) { name, days, defaults ->
             model.action { model.store.editFeed(feed.id, name, days, defaults); editingFeed = null }
         } }
         unsubscribingFeed?.let { feed -> AlertDialog(
             onDismissRequest = { unsubscribingFeed = null },
             title = { Text("Unsubscribe from ${feed.name}?") },
-            text = { Text("This removes the feed from Feeds, Latest, refresh and export. Downloaded episodes, queued tracks, ratings, bookmarks and list memberships are kept. You can subscribe again using its URL.") },
+            text = { Text(if (feed.isYouTube) "Remove this channel from your Pod4Me subscriptions? Your YouTube account is unchanged."
+                else "This removes the feed from Feeds, Latest, refresh and export. Downloaded episodes, queued tracks, ratings, bookmarks and list memberships are kept. You can subscribe again using its URL.") },
             confirmButton = { TextButton(onClick = { model.action {
                 model.store.unsubscribe(feed.id)
                 if (browseFeed == feed.id) browseFeed = null
@@ -268,7 +272,7 @@ private fun FeedScreen(library: Library, busy: Boolean, positions: ScrollPositio
     onOpenShared: () -> Unit, onBackup: () -> Unit, onRestore: () -> Unit, onBrowse: (Feed) -> Unit, onEdit: (Feed) -> Unit, onRefresh: (Feed) -> Unit, onSuggest: (Feed) -> Unit, onUnsubscribe: (Feed) -> Unit) {
     val context = LocalContext.current
     FlowRow(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(onClick = onAdd, enabled = !busy) { Text("Add RSS feed") }
+        Button(onClick = onAdd, enabled = !busy) { Text("Add subscription") }
         TextButton(onClick = onImport, enabled = !busy) { Text("Import") }
         TextButton(onClick = onExport) { Text("Export") }
         TextButton(onClick = onDiscover, enabled = !busy) { Text("Suggest") }
@@ -277,11 +281,39 @@ private fun FeedScreen(library: Library, busy: Boolean, positions: ScrollPositio
         TextButton(onClick = onRestore, enabled = !busy) { Text("Restore library") }
     }
     val visibleFeeds = library.feeds.filter { it.subscribed }
-    if (visibleFeeds.isEmpty()) EmptyState("Subscribe with an RSS URL or import a text file containing one feed URL per line, optionally followed by [podcast title].")
+    if (visibleFeeds.isEmpty()) EmptyState("Add an RSS feed or YouTube channel, or import one URL per line followed by [title].")
     else LazyColumn(state = positions.list("feeds", visibleFeeds.map(Feed::id)), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         items(visibleFeeds, key = Feed::id) { feed ->
-            OutlinedCard(Modifier.fillMaxWidth()) {
-                ArtworkRow(feed.artworkUrl, Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
+            val video = feed.id in library.videoFeeds
+            val label = when {
+                feed.isYouTube -> "YouTube ↗"
+                video && feed.id in library.audioFeeds -> "Audio + Video"
+                video -> "Video"
+                feed.id in library.audioFeeds -> "Audio"
+                else -> "RSS"
+            }
+            OutlinedCard(Modifier.fillMaxWidth(), colors = CardDefaults.outlinedCardColors(containerColor = when {
+                feed.isYouTube -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = .25f)
+                video -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = .25f)
+                else -> MaterialTheme.colorScheme.surface
+            })) {
+                if (feed.isYouTube) {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(painterResource(R.drawable.ic_video), contentDescription = "YouTube channel", modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(feed.name, modifier = Modifier.weight(1f).clickable { openYouTube(context, feed.url) },
+                                style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            ActionIcon(R.drawable.ic_settings, "Rename YouTube channel", onClick = { onEdit(feed) })
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(onClick = { openYouTube(context, feed.url) }, modifier = Modifier.weight(1f)) { Text("Watch on YouTube ↗") }
+                            ShareMenu("Share YouTube channel", small = true, onSuggest = { onSuggest(feed) },
+                                onCopyUrl = { copy(context, "YouTube channel", feed.url) })
+                            ActionIcon(R.drawable.ic_delete, "Unsubscribe from YouTube channel", small = true, onClick = { onUnsubscribe(feed) })
+                        }
+                    }
+                } else ArtworkRow(feed.artworkUrl, Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(feed.name, modifier = Modifier.weight(1f).clickable { onBrowse(feed) },
                             style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
@@ -294,7 +326,11 @@ private fun FeedScreen(library: Library, busy: Boolean, positions: ScrollPositio
                         val total = library.episodeCounts[feed.id] ?: 0
                         val saved = library.downloadCounts[feed.id] ?: 0
                         Column(Modifier.weight(1f)) {
-                            Text("${total} episodes · ${saved} saved", style = MaterialTheme.typography.labelSmall)
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Icon(painterResource(if (video) R.drawable.ic_video else R.drawable.ic_podcast), contentDescription = null, modifier = Modifier.size(14.dp))
+                                Text("$label · $total episodes · $saved saved", style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
                             Text("Expiry: ${feed.expiryDays?.let { "$it days" } ?: "never"}", style = MaterialTheme.typography.labelSmall)
                         }
                         if (feed.url.isNotBlank()) {
@@ -307,6 +343,16 @@ private fun FeedScreen(library: Library, busy: Boolean, positions: ScrollPositio
                 }
             }
         }
+    }
+}
+
+private fun openYouTube(context: Context, url: String) {
+    try {
+        context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(YouTubeChannels.normalize(url))))
+    } catch (_: android.content.ActivityNotFoundException) {
+        Toast.makeText(context, "Install YouTube or a browser to watch this channel", Toast.LENGTH_LONG).show()
+    } catch (_: IllegalArgumentException) {
+        Toast.makeText(context, "This YouTube channel URL is invalid", Toast.LENGTH_LONG).show()
     }
 }
 
@@ -914,7 +960,7 @@ private fun MiniPlayer(library: Library, model: AppModel, onOpen: () -> Unit) {
                 Icon(painterResource(R.drawable.ic_live), contentDescription = null)
                 Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                     Text(playback.radioName.orEmpty(), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(if (playback.buffering) "Connecting…" else if (playback.playing) "Live" else "Paused", style = MaterialTheme.typography.labelSmall)
+                    Text(radioStatus(playback), style = MaterialTheme.typography.labelSmall)
                 }
                 ActionIcon(if (playback.playing) R.drawable.ic_stop else R.drawable.ic_play,
                     if (playback.playing) "Stop radio" else "Play live", onClick = { model.action {

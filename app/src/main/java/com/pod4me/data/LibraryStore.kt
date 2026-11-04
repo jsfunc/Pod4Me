@@ -88,6 +88,18 @@ class LibraryStore(private val context: Context) : AutoCloseable {
         }
     }
 
+    suspend fun seedYouTubeChannel() = write { db ->
+        val url = com.pod4me.domain.YouTubeChannels.WAATH_URL
+        val exists = db.rawQuery("SELECT 1 FROM feeds WHERE url=?", arrayOf(url)).use { it.moveToFirst() }
+        if (!exists) saveFeed(db, url, FeedParser.Feed(com.pod4me.domain.YouTubeChannels.WAATH_NAME, emptyList()))
+    }
+
+    suspend fun subscribeYouTube(url: String, name: String? = null): String {
+        val normalized = com.pod4me.domain.YouTubeChannels.normalize(url)
+        return saveFeed(normalized, FeedParser.Feed(name?.trim()?.takeIf { it.isNotEmpty() }?.take(FeedParser.MAX_TITLE_CHARS)
+            ?: com.pod4me.domain.YouTubeChannels.defaultName(normalized), emptyList()))
+    }
+
     suspend fun description(id: String): String = withContext(Dispatchers.IO) {
         mutex.withLock { helper.readableDatabase.rows("SELECT description FROM episodes WHERE id=?", id) { it.str("description") }.firstOrNull().orEmpty() }
     }

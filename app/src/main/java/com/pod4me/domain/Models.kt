@@ -1,6 +1,8 @@
 package com.pod4me.domain
 
-data class Feed(val id: String, val url: String, val name: String, val expiryDays: Int?, val defaults: Set<String> = emptySet(), val error: String? = null, val artworkUrl: String? = null, val subscribed: Boolean = true)
+data class Feed(val id: String, val url: String, val name: String, val expiryDays: Int?, val defaults: Set<String> = emptySet(), val error: String? = null, val artworkUrl: String? = null, val subscribed: Boolean = true) {
+    val isYouTube get() = YouTubeChannels.isYouTube(url)
+}
 data class Episode(
     val id: String, val feedId: String, val title: String, val audioUrl: String,
     val description: String, val published: Long, val duration: Long = 0,
@@ -24,6 +26,8 @@ data class Library(
     private val feedIndex by lazy { feeds.associateBy(Feed::id) }
     val episodeCounts by lazy { episodes.groupingBy(Episode::feedId).eachCount() }
     val downloadCounts by lazy { episodes.filter(Episode::isDownloaded).groupingBy(Episode::feedId).eachCount() }
+    val videoFeeds by lazy { episodes.filter(Episode::isVideo).mapTo(mutableSetOf(), Episode::feedId) }
+    val audioFeeds by lazy { episodes.filterNot(Episode::isVideo).mapTo(mutableSetOf(), Episode::feedId) }
     fun episode(id: String?) = episodeIndex[id]
     fun feedName(id: String) = feedIndex[id]?.name ?: "Podcast"
     fun feedArtwork(id: String) = feedIndex[id]?.artworkUrl

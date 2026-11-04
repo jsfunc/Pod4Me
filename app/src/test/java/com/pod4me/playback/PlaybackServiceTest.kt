@@ -21,6 +21,42 @@ import java.io.File
 @Config(sdk = [35], application = PodApplication::class)
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class PlaybackServiceTest {
+    private fun service(app: PodApplication) = Robolectric.buildService(PlaybackService::class.java).create().also { controller ->
+        controller.get().createRadioBuffer = { station ->
+            RadioBuffer(app.cacheDir, station.url, capture = false).also { buffer ->
+                val audio = javaClass.getResourceAsStream("/radio/silence.mp3")!!.use { it.readBytes() }
+                repeat(12) { buffer.window.append(audio, 2_100_000, "mp3") }
+            }
+        }
+    }
+
+    @Test fun bufferedRadioExposesSeekableTimelineAndPauseDoesNotReconnect() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val controller = service(app)
+        try {
+            controller.get().startRadio(app.radios.read().first().id, play = false)
+            val p = player(controller.get())
+            val deadline = System.nanoTime() + 5_000_000_000L
+            while (!p.isCurrentMediaItemSeekable && System.nanoTime() < deadline) {
+                shadowOf(Looper.getMainLooper()).idle()
+                Thread.sleep(10)
+            }
+            assertTrue(p.isCurrentMediaItemSeekable)
+            assertEquals(25200L, p.duration)
+            val uri = p.currentMediaItem!!.localConfiguration!!.uri
+            p.seekTo(20000)
+            p.seekBack()
+            assertEquals(10000L, p.currentPosition)
+            controller.get().togglePlayback()
+            assertEquals(uri, p.currentMediaItem!!.localConfiguration!!.uri)
+            assertEquals(10000L, p.currentPosition)
+            controller.get().togglePlayback()
+            assertFalse(p.playWhenReady)
+            assertEquals(uri, p.currentMediaItem!!.localConfiguration!!.uri)
+            assertEquals(1f, p.playbackParameters.speed)
+        } finally { controller.destroy() }
+    }
+
     @Test fun videoStreamingKeepsQueueAndProgressAndDownloadedVideoUsesLocalFile() = runBlocking {
         val app = RuntimeEnvironment.getApplication() as PodApplication
         val audio = queuedEpisodes(app)
@@ -28,7 +64,7 @@ class PlaybackServiceTest {
             FeedParser.Item("v", "Video", "https://example.com/episode.mp4", "", 0, 10000, true))))
         val video = app.store.library.value.episodes.single { it.feedId == feed }
         app.store.progress(video.id, 2000, 10000)
-        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        val service = service(app)
         try {
             service.get().startEpisode(audio.first().id, audio.map { it.id }, 1000, play = false)
             player(service.get()).setPlaybackSpeed(1.5f)
@@ -61,7 +97,7 @@ class PlaybackServiceTest {
     @Test fun radioDoesNotConsumeQueueOrOverwritePodcastSpeedAndResume() = runBlocking {
         val app = RuntimeEnvironment.getApplication() as PodApplication
         val episodes = queuedEpisodes(app)
-        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        val service = service(app)
         try {
             val episode = episodes.first()
             service.get().startEpisode(episode.id, episodes.map { it.id }, 2000, play = false)
@@ -76,7 +112,7 @@ class PlaybackServiceTest {
             assertEquals(queue, app.store.library.value.queue)
             assertEquals(2000L, app.store.library.value.episode(episode.id)!!.position)
             assertFalse(service.get().playerCommands().contains(Player.COMMAND_SET_SPEED_AND_PITCH))
-            assertFalse(service.get().playerCommands().contains(Player.COMMAND_SEEK_FORWARD))
+            assertTrue(service.get().playerCommands().contains(Player.COMMAND_SEEK_FORWARD))
             assertEquals(station, service.get().savedRadio())
             service.get().startEpisode(episode.id, episodes.map { it.id }, -1, play = false)
             assertEquals(1.75f, player(service.get()).playbackParameters.speed)
@@ -92,7 +128,7 @@ class PlaybackServiceTest {
         app.store.initialize()
         val prefs = app.getSharedPreferences("playback", 0)
         prefs.edit().putString("current", "last-podcast").commit()
-        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        val service = service(app)
         try {
             service.get().startRadio(app.radios.read().first().id, play = false)
             service.get().stopPlayback()
@@ -106,7 +142,7 @@ class PlaybackServiceTest {
         val app = RuntimeEnvironment.getApplication() as PodApplication
         val episodes = queuedEpisodes(app)
         val station = app.radios.read().first()
-        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        val service = service(app)
         try {
             service.get().startRadio(station.id, play = false)
             service.get().handlePlaybackError()
@@ -126,7 +162,7 @@ class PlaybackServiceTest {
         val app = RuntimeEnvironment.getApplication() as PodApplication
         val station = app.radios.read().first()
         app.getSharedPreferences("playback", 0).edit().putString("radio", station.id).commit()
-        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        val service = service(app)
         try {
             assertEquals(0, player(service.get()).mediaItemCount)
             assertEquals(station, service.get().savedRadio())
@@ -138,7 +174,7 @@ class PlaybackServiceTest {
         val app = RuntimeEnvironment.getApplication() as PodApplication
         val episodes = queuedEpisodes(app)
         File(episodes[0].path!!).delete()
-        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        val service = service(app)
         try {
             assertEquals(0, player(service.get()).mediaItemCount)
             service.get().startQueue(play = false)
@@ -152,7 +188,7 @@ class PlaybackServiceTest {
         val app = RuntimeEnvironment.getApplication() as PodApplication
         val episodes = queuedEpisodes(app)
         app.getSharedPreferences("playback", 0).edit().putString("current", "deleted").commit()
-        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        val service = service(app)
         try {
             service.get().togglePlayback()
             assertEquals(episodes.first().id, player(service.get()).currentMediaItem!!.mediaId)
@@ -165,7 +201,7 @@ class PlaybackServiceTest {
         val app = RuntimeEnvironment.getApplication() as PodApplication
         val episodes = queuedEpisodes(app)
         episodes.forEach { File(it.path!!).delete() }
-        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        val service = service(app)
         try {
             try { service.get().startQueue(play = false); fail("Missing audio cannot start") }
             catch (e: IllegalStateException) { assertTrue(e.message!!.contains("download an episode")) }
@@ -178,7 +214,7 @@ class PlaybackServiceTest {
     @Test fun failedPlaybackUnloadsAndAllowsDeletionButPausedPlaybackIsProtected() = runBlocking {
         val app = RuntimeEnvironment.getApplication() as PodApplication
         val episodes = queuedEpisodes(app)
-        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        val service = service(app)
         try {
             val ep = episodes.first()
             service.get().startEpisode(ep.id, episodes.map { it.id }, 1000, play = false)
@@ -222,7 +258,7 @@ class PlaybackServiceTest {
         LibraryDatabase(app).use { it.writableDatabase.execSQL("UPDATE episodes SET path=?,expiry=1 WHERE id=?", arrayOf(file.path, ep.id)) }
         app.store.initialize()
         app.getSharedPreferences("playback", 0).edit().putString("current", ep.id).commit()
-        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        val service = service(app)
         try {
             shadowOf(Looper.getMainLooper()).idle()
             val player = player(service.get())
@@ -246,7 +282,7 @@ class PlaybackServiceTest {
             helper.writableDatabase.execSQL("UPDATE episodes SET path=? WHERE id=?", arrayOf(file.path, ep.id))
         } }
         app.store.initialize()
-        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        val service = service(app)
         try {
             val middle = episodes[1]
             service.get().startEpisode(middle.id, episodes.map { it.id }, 9600, play = false)

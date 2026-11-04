@@ -19,6 +19,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -101,14 +102,14 @@ internal fun RadioScreen(model: AppModel, positions: ScrollPositions) {
                                 tint = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                             Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                                 Text(station.name, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                if (active) Text(if (playback.buffering) "Connecting…" else if (playback.playing) "Live" else "Paused",
+                                if (active) Text(radioStatus(playback),
                                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                             }
                             IconButton(onClick = { removingId = station.id }) {
                                 Icon(painterResource(R.drawable.ic_delete), contentDescription = "Unsubscribe from ${station.name}")
                             }
                             FilledIconButton(enabled = playback.connected, onClick = { model.action {
-                                if (active && playback.playing) model.player.stop() else model.player.playRadio(station.id)
+                                if (active && playback.playing) model.player.stop() else if (active) model.player.toggle() else model.player.playRadio(station.id)
                             } }) {
                                 Icon(painterResource(if (active && playback.playing) R.drawable.ic_stop else R.drawable.ic_play),
                                     contentDescription = if (active && playback.playing) "Stop ${station.name}" else "Play ${station.name}")
@@ -199,13 +200,29 @@ private fun RadioPicker(model: AppModel, subscribed: List<RadioStation>, onDismi
 
 @Composable
 fun LivePlayer(playback: PlaybackUi, model: AppModel) {
+    var seeking by remember(playback.id) { mutableStateOf<Float?>(null) }
+    val behind = (playback.duration - (seeking?.toLong() ?: playback.position)).coerceAtLeast(0)
+    fun duration(ms: Long): String = "%d:%02d".format(ms / 60000, ms / 1000 % 60)
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Icon(painterResource(R.drawable.ic_live), contentDescription = null, modifier = Modifier.size(64.dp), tint = MaterialTheme.colorScheme.primary)
         Text(playback.radioName.orEmpty(), style = MaterialTheme.typography.headlineSmall)
-        Text(if (playback.buffering) "Connecting…" else if (playback.playing) "Live" else "Paused")
+        Text(if (playback.buffering) "Buffering…" else if (!playback.playing) "Paused"
+            else if (playback.liveOffset <= 8000) "Live" else "${duration(behind)} behind live")
+        Slider(value = seeking ?: playback.position.toFloat().coerceIn(0f, playback.duration.toFloat().coerceAtLeast(1f)),
+            modifier = Modifier.semantics { contentDescription = "Rewind buffered live radio" },
+            onValueChange = { seeking = it }, valueRange = 0f..playback.duration.toFloat().coerceAtLeast(1f),
+            enabled = playback.canSeek && playback.duration > 0,
+            onValueChangeFinished = { seeking?.let { value -> model.action { model.player.seek(value.toLong()) } }; seeking = null })
+        Text("${duration(playback.duration)} available · up to 30 minutes", style = MaterialTheme.typography.bodySmall)
+        Text("Rewind starts when you tune in. Stop or change station to clear it.", style = MaterialTheme.typography.bodySmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(enabled = playback.canSeek, onClick = { model.action { model.player.back() } }) { Text("−10s") }
+            Button(enabled = playback.connected, onClick = { model.action { model.player.toggle() } }) { Text(if (playback.playing) "Pause" else "Resume") }
+            OutlinedButton(enabled = playback.canSeek, onClick = { model.action { model.player.forward() } }) { Text("+10s") }
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (!playback.playing) Button(onClick = { model.action { model.player.toggle() } }) { Text("Play live") }
+            Button(enabled = playback.canSeek, onClick = { model.action { model.player.goLive() } }) { Text("Back to live") }
             Button(onClick = { model.action { model.player.stop() } }) {
                 Icon(painterResource(R.drawable.ic_stop), contentDescription = null)
                 Spacer(Modifier.width(8.dp))
@@ -213,4 +230,11 @@ fun LivePlayer(playback: PlaybackUi, model: AppModel) {
             }
         }
     }
+}
+
+internal fun radioStatus(playback: PlaybackUi): String = when {
+    playback.buffering -> "Buffering…"
+    !playback.playing -> "Paused"
+    playback.liveOffset <= 8000 -> "Live"
+    else -> "%d:%02d behind live".format(playback.liveOffset / 60000, playback.liveOffset / 1000 % 60)
 }
