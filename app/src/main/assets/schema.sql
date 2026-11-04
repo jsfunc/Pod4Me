@@ -1,4 +1,4 @@
-CREATE TABLE feeds(id TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, name TEXT NOT NULL, expiry_days INTEGER, error TEXT, artwork_url TEXT, subscribed INTEGER NOT NULL DEFAULT 1 CHECK(subscribed IN (0,1)), etag TEXT, last_modified TEXT, last_refreshed INTEGER);
+CREATE TABLE feeds(id TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, name TEXT NOT NULL, expiry_days INTEGER, error TEXT, artwork_url TEXT, subscribed INTEGER NOT NULL DEFAULT 1 CHECK(subscribed IN (0,1)), etag TEXT, last_modified TEXT, last_refreshed INTEGER, unsubscribed_move_url TEXT);
 CREATE TABLE lists(id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, system INTEGER NOT NULL DEFAULT 0);
 INSERT INTO lists VALUES('unheard','Unheard',1);
 INSERT INTO lists VALUES('heard','Heard',1);

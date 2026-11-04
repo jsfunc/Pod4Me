@@ -21,6 +21,43 @@ import java.io.File
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = Application::class)
 class LibraryStoreTest {
+    @Test fun untrustedMoveCannotChangeAddressEvenWhenDestinationIsHttps() = runBlocking {
+        val original = store.library.value.subscriptions.single()
+        for (directive in listOf(false, true)) {
+            val data = FeedParser.Feed("Feed", listOf(FeedParser.Item("new-$directive", "New-$directive", "https://example.com/new.mp3", "", 1, 0)), "", 0,
+                if (directive) "https://attacker.example/feed" else "")
+            store.applyRefresh(original, com.pod4me.data.FeedResponse(data, "v1", null,
+                if (directive) null else "https://attacker.example/feed", allowAddressChange = false))
+            val saved = store.library.value.subscriptions.single()
+            assertEquals(original.url, saved.url); assertNull(saved.error); assertNull(saved.unsubscribedMoveUrl)
+            assertTrue(store.library.value.episodes.any { it.title == "New-$directive" })
+        }
+        store.applyRefresh(original, com.pod4me.data.FeedResponse(null, "v1", null,
+            "https://attacker.example/feed", allowAddressChange = false))
+        assertEquals(original.url, store.library.value.subscriptions.single().url)
+        assertTrue(store.library.value.episode(episode.id)!!.isDownloaded)
+    }
+
+    @Test fun publisherMoveNoticeSurvivesReloadAnd304ThenClearsWhenPublisherWithdrawsMove() = runBlocking {
+        val original = store.library.value.subscriptions.single()
+        val target = "https://example.com/previously-unsubscribed"
+        store.unsubscribe(store.saveFeed(target, FeedParser.Feed("Old feed", emptyList())))
+        store.applyRefresh(original, com.pod4me.data.FeedResponse(FeedParser.Feed("Feed", emptyList(), "", 0, target), "v1", null))
+        assertEquals(target, store.library.value.subscriptions.single().unsubscribedMoveUrl)
+        LibraryStore(RuntimeEnvironment.getApplication()).use { reopened ->
+            reopened.initialize()
+            assertEquals(target, reopened.library.value.subscriptions.single().unsubscribedMoveUrl)
+        }
+        store.feedError(original.id, "Offline")
+        assertEquals(target, store.library.value.subscriptions.single().unsubscribedMoveUrl)
+        store.applyRefresh(original, com.pod4me.data.FeedResponse(null, "v1", null))
+        assertEquals(target, store.library.value.subscriptions.single().unsubscribedMoveUrl)
+        assertNull(store.library.value.subscriptions.single().error)
+        store.applyRefresh(original, com.pod4me.data.FeedResponse(FeedParser.Feed("Feed", emptyList()), "v2", null))
+        assertNull(store.library.value.subscriptions.single().unsubscribedMoveUrl)
+        assertEquals(original.url, store.library.value.subscriptions.single().url)
+    }
+
     @Test fun concurrentImportAliasesCommitOneNameAndNeverOverwriteExistingHistory() = runBlocking {
         val parsed = FeedParser.Feed("Publisher", listOf(FeedParser.Item("new", "New", "https://example.com/new.mp3", "", 1, 10000)))
         val url = "https://example.com/imported"
@@ -74,6 +111,7 @@ class LibraryStoreTest {
         store.applyRefresh(original, com.pod4me.data.FeedResponse(targetData, "target-tag", null, "https://example.com/target"), 200)
         val refreshed = store.library.value.subscriptions.single()
         assertEquals(original.url, refreshed.url); assertEquals(original.id, refreshed.id); assertNull(refreshed.error)
+        assertEquals("https://example.com/target", refreshed.unsubscribedMoveUrl)
         assertEquals(200L, refreshed.lastRefreshed)
         assertEquals(retained, store.library.value.episode(targetEpisode.id))
         assertFalse(store.library.value.feeds.single { it.id == targetId }.subscribed)

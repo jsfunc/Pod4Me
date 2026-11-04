@@ -876,6 +876,12 @@ private fun FeedEditDialog(feed: Feed, lists: List<TrackList>, positions: Scroll
                 ShareMenu("Share feed", onSuggest = { share(context, Suggestions.feed(feed)) },
                     onCopyUrl = { copy(context, "Podcast feed", feed.url) })
             }
+            feed.unsubscribedMoveUrl?.let { destination ->
+                SelectionContainer {
+                    Text("Publisher moved this feed to $destination, which you unsubscribed from earlier. The current address is kept.",
+                        style = MaterialTheme.typography.bodySmall)
+                }
+            }
             OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Feed name") },
                 modifier = Modifier.fillMaxWidth(), singleLine = true)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),

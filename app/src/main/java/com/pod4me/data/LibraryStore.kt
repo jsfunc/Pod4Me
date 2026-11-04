@@ -21,7 +21,7 @@ import java.io.File
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
 
-class LibraryDatabase(context: Context) : SQLiteOpenHelper(context, "pod4me.db", null, 8) {
+class LibraryDatabase(context: Context) : SQLiteOpenHelper(context, "pod4me.db", null, 9) {
     private val app = context.applicationContext
     override fun onConfigure(db: SQLiteDatabase) { db.setForeignKeyConstraintsEnabled(true) }
     override fun onCreate(db: SQLiteDatabase) { executeAsset(db, "schema.sql") }
@@ -39,6 +39,7 @@ class LibraryDatabase(context: Context) : SQLiteOpenHelper(context, "pod4me.db",
         if (version == 5 && newVersion >= 6) { executeAsset(db, "migration_5_6.sql"); version = 6 }
         if (version == 6 && newVersion >= 7) { executeAsset(db, "migration_6_7.sql"); version = 7 }
         if (version == 7 && newVersion >= 8) { executeAsset(db, "migration_7_8.sql"); version = 8 }
+        if (version == 8 && newVersion >= 9) { executeAsset(db, "migration_8_9.sql"); version = 9 }
         check(version == newVersion) { "A migration from $oldVersion to $newVersion is required" }
     }
 }
@@ -161,7 +162,9 @@ class LibraryStore(private val context: Context) : AutoCloseable {
     suspend fun applyRefresh(feed: Feed, response: FeedResponse, now: Long = System.currentTimeMillis()) = write { db ->
         val current = db.rows("SELECT url,subscribed FROM feeds WHERE id=?", feed.id) { it.str("url") to it.long("subscribed") }.firstOrNull()
         if (current != (feed.url to 1L)) return@write
-        val proposed = response.parsed?.newFeedUrl()?.takeIf(String::isNotBlank) ?: response.permanentUrl ?: feed.url
+        val proposed = if (response.allowAddressChange)
+            response.parsed?.newFeedUrl()?.takeIf(String::isNotBlank) ?: response.permanentUrl ?: feed.url
+        else feed.url
         // Continue reading a publisher's response, but never make a secure subscription permanently cleartext.
         val safeDestination = if (java.net.URI(feed.url).scheme.equals("https", true) &&
             java.net.URI(proposed).scheme.equals("http", true)) feed.url else proposed
@@ -171,6 +174,12 @@ class LibraryStore(private val context: Context) : AutoCloseable {
         check(duplicate != true) { "This feed moved to an existing subscription. Review both subscriptions before merging: $safeDestination" }
         // An unsubscribed row may still own downloads/history. Keep both identities intact.
         val destination = if (duplicate == false) feed.url else safeDestination
+        val moveNotice = when {
+            duplicate == false -> safeDestination
+            response.parsed == null && destination == feed.url ->
+                db.rows("SELECT unsubscribed_move_url FROM feeds WHERE id=?", feed.id) { it.nullStr("unsubscribed_move_url") }.firstOrNull()
+            else -> null
+        }
         if (response.parsed != null) saveFeed(db, feed.url, response.parsed, feed.id)
         else {
             db.update("episodes", values("new_in_last_refresh" to 0), "feed_id=? AND new_in_last_refresh=1", arrayOf(feed.id))
@@ -179,7 +188,8 @@ class LibraryStore(private val context: Context) : AutoCloseable {
         // A publisher's new-feed-url can point beyond the response that supplied the validators.
         val differentResource = destination != feed.url && destination != response.permanentUrl
         db.update("feeds", values("url" to destination, "etag" to if (differentResource) null else response.etag,
-            "last_modified" to if (differentResource) null else response.lastModified, "last_refreshed" to now), "id=?", arrayOf(feed.id))
+            "last_modified" to if (differentResource) null else response.lastModified, "last_refreshed" to now,
+            "unsubscribed_move_url" to moveNotice), "id=?", arrayOf(feed.id))
     }
 
     /** Network subscriptions record freshness; bundled/backup data must not claim a successful fetch.
@@ -442,7 +452,7 @@ class LibraryStore(private val context: Context) : AutoCloseable {
         val memberships = db.rows("SELECT episode_id,list_id FROM memberships") { it.str("episode_id") to it.str("list_id") }.groupBy({ it.first }, { it.second })
         val defaults = db.rows("SELECT feed_id,list_id FROM feed_defaults") { it.str("feed_id") to it.str("list_id") }.groupBy({ it.first }, { it.second })
         return Library(true,
-            db.rows("SELECT * FROM feeds ORDER BY name COLLATE NOCASE") { Feed(it.str("id"), it.str("url"), it.str("name"), it.nullLong("expiry_days")?.toInt(), defaults[it.str("id")]?.toSet() ?: emptySet(), it.nullStr("error"), it.nullStr("artwork_url"), it.long("subscribed") == 1L, it.nullStr("etag"), it.nullStr("last_modified"), it.nullLong("last_refreshed")) },
+            db.rows("SELECT * FROM feeds ORDER BY name COLLATE NOCASE") { Feed(it.str("id"), it.str("url"), it.str("name"), it.nullLong("expiry_days")?.toInt(), defaults[it.str("id")]?.toSet() ?: emptySet(), it.nullStr("error"), it.nullStr("artwork_url"), it.long("subscribed") == 1L, it.nullStr("etag"), it.nullStr("last_modified"), it.nullLong("last_refreshed"), it.nullStr("unsubscribed_move_url")) },
             db.rows("SELECT $projection FROM episodes") { readEpisode(it).let { ep -> ep.copy(lists = memberships[ep.id]?.toSet() ?: emptySet()) } },
             db.rows("SELECT * FROM lists ORDER BY system DESC,name COLLATE NOCASE") { TrackList(it.str("id"), it.str("name"), it.long("system") == 1L) },
             db.rows("SELECT * FROM bookmarks ORDER BY position") { Bookmark(it.long("id"), it.str("episode_id"), it.long("position"), it.str("name")) },

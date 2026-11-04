@@ -70,9 +70,10 @@ internal class RadioBuffer(cacheDirectory: File, url: String,
                 if (e is CancellationException || closed.get() || captureStopped.get()) break
                 if (window.latestSequence != previousSequence) attempts = 0
                 previousSequence = window.latestSequence
-                lastFailure = e.message
+                lastFailure = radioFailureReason(e)
                 window.fail(IOException("Could not receive this radio: ${e.message}", e))
-                if (++attempts > (if (window.hasAudio) retryLimit else minOf(retryLimit, 2)) || (e is InvalidStation && !window.hasAudio)) {
+                val permanent = e is InvalidStation || (e is RadioHttpException && e.permanent)
+                if (++attempts > (if (window.hasAudio) retryLimit else minOf(retryLimit, 2)) || (permanent && !window.hasAudio)) {
                     window.finish()
                     mutableStatus.value = Status.UNAVAILABLE
                     break
@@ -112,7 +113,7 @@ internal class RadioBuffer(cacheDirectory: File, url: String,
             val type = response.header("Content-Type").orEmpty()
             val prefix = if (source.request(7)) source.peek().readUtf8(7) else ""
             if (type.contains("text/html", true) || prefix.trimStart().startsWith("<html", true) || prefix.startsWith("<!docty", true))
-                throw InvalidStation("Use the station's direct audio URL, not its web page")
+                throw InvalidStation("This address is a web page. Use the station's direct audio URL")
             val playlist = type.contains("mpegurl", true) || type.contains("scpls", true) ||
                 prefix == "#EXTM3U" || prefix.startsWith("[playli", true) ||
                 response.request.url.encodedPath.endsWith(".m3u", true) || response.request.url.encodedPath.endsWith(".pls", true)
@@ -169,8 +170,7 @@ internal class RadioBuffer(cacheDirectory: File, url: String,
             val response = call.execute()
             if (!response.isSuccessful || (length >= 0 && response.code != 206)) {
                 response.close()
-                if (response.code in 400..499 && response.code !in setOf(408, 429)) throw InvalidStation("Radio server returned HTTP ${response.code}")
-                throw IOException("Radio server returned HTTP ${response.code}")
+                throw RadioHttpException(response.code)
             }
             return response
         } finally {

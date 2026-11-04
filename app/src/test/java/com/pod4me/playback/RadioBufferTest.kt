@@ -51,6 +51,8 @@ class RadioBufferTest {
                 awaitCondition { buffer.status.value == RadioBuffer.Status.UNAVAILABLE }
                 assertFalse(buffer.window.hasAudio)
                 assertEquals(if (kind == "offline") 3 else 1, requests.get())
+                if (kind == "html") assertEquals("This address is a web page. Use the station's direct audio URL", buffer.lastFailure)
+                if (kind == "404") assertEquals("The stream address is unavailable (HTTP 404)", buffer.lastFailure)
             } finally { buffer.close() }
         }
     }

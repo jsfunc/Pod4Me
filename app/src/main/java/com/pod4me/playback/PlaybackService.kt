@@ -344,7 +344,7 @@ class PlaybackService : MediaSessionService() {
     }
 
     private fun radioFailureMessage(): String? = radioBuffer?.lastFailure?.let {
-        "Could not play ${liveStation?.name ?: "this radio"}: $it. Check the connection or direct stream URL and tap Play to retry."
+        radioStartupMessage(liveStation?.name ?: "this radio", it)
     }
     internal fun handlePlaybackError(message: String? = null) {
         val failedStation = liveStation

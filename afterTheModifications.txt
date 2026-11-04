@@ -11,45 +11,37 @@ PARTIAL = part of the finding remains; NOT ADDRESSED; NEW = problem introduced b
 modifications; NEEDS PHONE = only a device test can settle it.
 
 
-OPEN ITEMS (as of round 2, commit 36c976a, 1.0.22 / code 30)
+OPEN ITEMS (as of round 3, commit b6d075b, 1.0.24 / code 32)
 ============================================================
-To fix before release
-  N5  MEDIUM  REGRESSION of H1. After a station has been captured, one HTTP 4xx (Icecast
-              "source not connected" 404, an expired HLS token 403, a segment 404) or one
-              captive-portal HTML page ends capture at once (UNAVAILABLE) instead of
-              reconnecting. Shown by probes Q1 and Q3.
+No blocking issue. Nothing must be fixed before the phone tests.
 Small fixes
-  N6  LOW     Sleep timer: session extras are pushed every second, for the whole service
-              lifetime, even with no timer running, to every controller and to the platform
-              session (system UI, Bluetooth, Wear/Auto).
-  N7  LOW     Sleep timer: a timer that expires while paused, with the phone asleep, stops the next
-              headset/notification Play after about 1 s.
-  N8  LOW     Mark Unheard keeps the 3-day Heard deadline. An accidental Heard, such as a scrub
-              past 95%, still deletes the file 3 days later (probe Q6).
-  N9  LOW     The radio notice "paused position expired" permanently hides later "Reconnecting…"
-              and "Station unavailable" statuses (probe Q4).
-  N10 LOW     A feed that moves to the URL of a previously unsubscribed feed fails on every
-              refresh with "moved to an existing subscription" (probe Q5).
-  N11 LOW     Non-I/O podcast errors other than 5xxx (1xxx, 6xxx, 7xxx) are reported as "Audio
-              output was interrupted. Check your speaker or Bluetooth…".
-  N12 LOW     Security: an https→http permanent redirect or new-feed-url is persisted, so the
-              feed is then fetched in cleartext and can be moved again by a network attacker.
+  N12b LOW (security)  Remainder of N12. If any hop of a secure feed's fetch was cleartext (the
+              https host redirects to http), that cleartext body or an injected 301 can still
+              move the subscription to any HTTPS address chosen by a network attacker (probe
+              Q7). Only a direct https→http move is refused.
 Information and polish
-  N13 INFO    Several small issues; see Round 2: the specific radio failure reason is lost, a
-              URL without "https://" is searched as a name, OPML import is sequential with no
-              progress, the end-of-episode countdown ignores speed, single-feed refresh hides
-              earlier failures, OPML xmlUrl is case-sensitive, and validators must be reset
-              when the parser changes.
-Still open from earlier rounds
-  H1  NEEDS PHONE  The recorder is fixed, but see N5. Device test of a real outage still pending.
-  N3  FIXED as decided (replays the retained window from its start); NEEDS PHONE.
-  L9  PARTIAL by decision (keys not cached, to respect key rotation).
-  L8, L10, L11  NOT ADDRESSED (performance and quality items, not bugs or security).
-  S1, S2  Unchanged by user decision (2026-11-01).
-  Pending phone checks: sleep timer with the screen off and at the end of the queue,
-              fullscreen video (rotation, surface swap, gestures, TalkBack), and the radio
-              outage, pause limit and replay.
+  N14 INFO    N10 as decided: when a feed's new-feed-url points to a previously unsubscribed
+              address, the old address is kept silently. If the publisher then freezes the old
+              feed, new episodes stop arriving with no hint why.
+  N15 INFO    Radio startup error wording repeats itself and has a capital letter mid-sentence
+              ("Could not play X: Use the station's direct audio URL… Check the connection or
+              direct stream URL…").
+  N13h        Still open for discussion: skip silence, accent folding in the station picker,
+              disabling the video track without a surface, splitting PodApp.kt.
+Kept by user decision
+  N8  Mark Unheard keeps the shortened Heard deadline (handover, after round 2).
+  N10 A move to a previously unsubscribed address keeps the current address (both histories
+      kept).
+  N3  Replay from the start of a finished radio window (explicit Back to live).
+  L9  Keys not cached (key rotation).   S1, S2  Unchanged (2026-11-01).
+Not addressed
+  L8, L10, L11 (performance and quality items, not bugs or security).
+Needs a phone (nothing in rounds 1–3 was tested on a device)
+  H1 / N5     Radio outage and recovery: Wi-Fi off; Icecast/HLS hiccups; captive portal.
+  Device checks 53 and 59–64: pause limit/replay, sleep timer with the screen off and at the
+              end of the queue, fullscreen video, import progress, mini-player Pause/Stop.
 Closed in round 2: N1, N2, N4, L4.
+Closed in round 3: N5, N6, N7, N9, N11, N12 (direct downgrade; see N12b), N13a–g; N10 as decided.
 
 
 ROUND 1 — 2026-11-04, 17:02 snapshot
@@ -524,3 +516,167 @@ capture has started, so ordinary mid-broadcast hiccups (Icecast 404, captive por
 N8/N10 involve a product decision. Nothing in this round was tested on a phone. The pending
 device checks (radio outage/pause limit/replay, sleep timer with the screen off, fullscreen
 video) remain open.
+
+
+ROUND 3 — 2026-11-04, commits a0409bd and b6d075b
+=================================================
+Code state tested
+-----------------
+  HEAD b6d075b, "Speed up subscription imports and add compact playback details" (21:08), on
+  top of a0409bd, "Fix radio recovery and timer lifecycle after review" (21:00). Working tree
+  clean. Version 1.0.24 / versionCode 32 (gradle and build-apk.sh agree), schema 8, backup 2.
+  The commit was extracted with `git archive` into a scratch snapshot, and all checks ran on
+  that copy. This round covers the round-2 corrections (a0409bd) and three newly approved
+  improvements (b6d075b):
+    - parallel import with progress;
+    - radio mini-player Pause/Stop;
+    - last refresh shown in feed settings.
+  Code changed: PlaybackService, PlayerClient, RadioBuffer, LibraryStore, the new
+  SubscriptionImporter, SubscriptionFormat, AppModel, PodApp, RadioScreen, SleepTimerControl and
+  SubscriptionDialog, plus tests and docs. Round 2 was committed unchanged inside a0409bd.
+
+Executed
+--------
+  java tools/CoreTestLauncher.java ............ PASS, 139 core checks
+  python3 -I tools/check_schema.py ............ PASS, 11 schema/XML checks
+  ./gradlew :app:testDebugUnitTest :app:lintRelease --rerun-tasks --offline (fresh build)
+      unit tests ............................. PASS, 162 tests, 0 failures/errors/skips
+      release lint ........................... 0 errors, 26 warnings offline. The handover's 37
+                                               includes online dependency notices. No new
+                                               warning types.
+  Round-2 probes rerun against this code, plus one new probe. AuditProbe3Test.kt is kept only in
+  the scratch snapshot:
+      Q1 audio, then 404 / portal HTML ....... not UNAVAILABLE. It keeps reconnecting and
+                                               capturing (was UNAVAILABLE after 2 requests).
+      Q3 HLS segment 404 after audio ......... CAPTURING, recovered (latest sequence 6).
+      Q4 notice + RECONNECTING/UNAVAILABLE ... "Reconnecting…" / "Station unavailable · Buffer
+                                               kept…"
+      Q5 move to an unsubscribed feed URL .... no error; the subscription keeps its address.
+      Q6 Heard by seek, then Unheard ......... still 30 → 3 → 3 days (kept by user decision).
+      Q7 secure feed, cleartext hop .......... new-feed-url in the cleartext body → moved to
+                                               https://attacker.example/feed. 301 chain
+                                               https→http→https://attacker → moved. A direct
+                                               https→http 301 → refused (kept https).
+  The repo's new tests were read and match their names:
+    - client errors and portal HTML after audio reconnect;
+    - a missing HLS segment re-fetches the playlist and recovers;
+    - immediate failure reports "HTTP 404" without a half-configured player;
+    - an expired timer does not swallow a resume from the app or a headset;
+    - per-code error wording;
+    - the importer, aliases, and refresh failure retention.
+Not executed: release assembly/signing (the handover records a 1.0.24 build), instrumented
+tests, any phone. ADB lists no device.
+
+Verdicts on round-2 items
+-------------------------
+N5  Mid-broadcast 4xx/HTML ends capture .................... FIXED
+    InvalidStation is now terminal only while !window.hasAudio. After audio it counts as an
+    ordinary retry with backoff, and the counter resets when audio arrives again. For HLS, a
+    missing segment makes the outer loop re-fetch the playlist (kept sequence state) and
+    recover. A segment that stays 404 is retried until it leaves the playlist, at worst until
+    the retry budget runs out; skipping it at once would be faster, but this is acceptable.
+    The status collector now runs under the operations lock, after a yield(), and ignores
+    stale buffers. This also closes the race the authors reproduced (an immediate failure
+    during player setup). Q1/Q3 and repo tests.
+N6  Extras broadcast every second .......................... FIXED
+    The 1-s loop is gone. One cancellable job waits for the deadline. Extras are published
+    only when the Extras value changes, and they carry the absolute SLEEP_DEADLINE. PlayerClient
+    derives the remaining time from elapsedRealtime, which is the same device-wide clock. A
+    controller that connects later still receives the current extras in its connection state.
+N7  Expired paused timer stops the next resume ............... FIXED
+    clearExpiredTimerOnResume runs on the togglePlayback path and in onPlayWhenReadyChanged(true),
+    which covers headsets and notifications. It cancels the stale timer without pausing.
+    Tested. While playing, the player's wake lock keeps the CPU awake, so the job is not
+    frozen by deep sleep.
+N8  Unheard keeps the 3-day deadline ....................... KEPT by user decision (handover).
+N9  Notice hides later statuses ............................ FIXED
+    The connection/capture statuses come first, and any buffer status change clears the
+    notice. Q4.
+N10 Move to an unsubscribed feed fails forever ............. FIXED as decided
+    Only an active subscription at the destination is a conflict. For an unsubscribed one, the
+    current address is kept and the refresh succeeds, so both histories stay separate (Q5).
+    See N14.
+N11 Wrong wording for non-file errors ...................... FIXED
+    Speaker/Bluetooth wording only for 5xxx; other codes get "Playback stopped unexpectedly. Tap
+    Play to retry." Tested for 1000/1003/5001/6001/7000. Minor: radio errors with 1xxx codes now
+    get this neutral text instead of the station-specific one. Harmless.
+N12 HTTPS → HTTP permanent downgrade ....................... FIXED for the direct case; see N12b
+N13 Polish ................................................. FIXED a–g, h open
+    a) The radio startup reason is shown: lastFailure, cleared once audio arrives (see N15 for
+       the wording).
+    b) Scheme-less "host.tld/path" input becomes https://… (a space, no "/" or no dot in the
+       host means it is searched as a name).
+    c) Import now runs 4 at a time with "Importing n/N" (see the b6d075b review below).
+    d) The End countdown divides by the speed.
+    e) Refresh failures merge with earlier ones and are filtered to current subscriptions.
+    f) OPML attributes are case-insensitive, and "url" is accepted for type rss/link.
+    g) The handover's regression traps now say to clear validators when the parser changes.
+
+Review of b6d075b (approved improvements)
+-----------------------------------------
+Parallel import (SubscriptionImporter) ...................... GOOD
+    At most 4 in flight. Failures are isolated and completed subscriptions kept. Cancellation
+    propagates. Progress updates are serialized. Apple links still go through the shared
+    rate-limited client. YouTube entries are saved without a fetch, which is equivalent to
+    subscribeYouTube. LibraryStore.saveSubscription rechecks "already subscribed" and sets the
+    name only on creation, inside one write transaction. So two aliases that resolve to the
+    same RSS URL cannot double-subscribe or rename. A retained unsubscribed feed is
+    re-subscribed with its settings and history.
+Radio mini-player Pause/Resume/Replay + Stop ................ GOOD
+    Pause/Resume uses the existing toggle, so the 30-min pause cap and wake lock apply. Stop is
+    a separate icon whose content description says it clears the buffer, and it sits next to
+    Pause. A phone check of target size and accidental taps is part of check 64.
+Last refresh in feed settings ............................... GOOD
+    The dialog reads the live Feed by id, while its editable fields are remembered by feed.id, so
+    a background refresh does not wipe edits. New subscriptions and imports record
+    last_refreshed and clear stale validators. Bundled and backup data show "No refresh
+    recorded".
+
+New problems / further improvements
+-----------------------------------
+N12b LOW (security)  A cleartext hop can still move a secure subscription
+    Where: LibraryStore.applyRefresh (the downgrade check compares only the scheme of the final
+           proposed URL) and FeedClient (OkHttp follows https→http redirects; FeedResponse does
+           not say whether the body arrived in cleartext).
+    What:  Suppose an https feed redirects to http, for example during a host misconfiguration.
+           The body is then fetched in cleartext, and its new-feed-url is trusted. Likewise, a
+           301/308 injected on the cleartext hop toward an HTTPS URL becomes permanentUrl. Either
+           way, a network attacker on that hop can permanently re-point the subscription to an
+           HTTPS feed they control (probe Q7, both forms). The direct https→http move is
+           correctly refused.
+    Fix:   In FeedClient, record whether any response in the redirect chain was http. When the
+           subscription is https and any hop was http:
+             - ignore new-feed-url;
+             - do not persist any permanentUrl;
+             - keep using the content, as now.
+           Simpler: build the feed OkHttpClient with followSslRedirects(false) and report "This
+           feed redirects to an insecure address" for https subscriptions.
+
+N14 INFO  A silently kept address after a move to a previously unsubscribed feed
+    With a 301 the old address keeps redirecting, so content stays current. With
+    new-feed-url alone, publishers often freeze the old feed, and the subscription then just
+    stops getting episodes. Fix: show a non-error line in feed settings: "Publisher moved this
+    feed to <B>, which you unsubscribed from earlier." Optionally add a one-tap "Switch to new
+    address", keeping both histories.
+
+N15 INFO  Radio startup error wording
+    radioFailureMessage builds "Could not play <station>: <reason>. Check the connection or
+    direct stream URL and tap Play to retry." Results:
+      - for HTML: "…: Use the station's direct audio URL, not its web page. Check the
+        connection or direct stream URL…" (a capital letter mid-sentence, and the advice
+        repeated);
+      - for DNS failures, OkHttp's raw text ('Unable to resolve host "…": No address
+        associated with hostname').
+    Fix: map the known causes (HTML page, HTTP 4xx/5xx, DNS, timeout) to short phrases, and
+    keep the raw message only as a fallback.
+
+Round 3 conclusion
+------------------
+The round-2 findings are resolved: N5 (the H1 regression), N6, N7, N9, N11, the direct N12
+case, and N13a–g are fixed and tested. N8 and N10 follow explicit user decisions recorded in the
+handover. The three approved improvements are implemented without new defects. Checks pass:
+139 core, 11 schema and 162 unit tests, and lint has 0 errors. The only remaining code item is
+N12b (LOW, security). N14 and N15 are polish. From the code side, the app is ready for the
+pending phone tests: H1/N5 radio outages, the pause limit and Replay, the screen-off sleep
+timer, fullscreen video, import progress and mini-player Pause/Stop (checks 53, 59–64).
+Nothing in this round was tested on a phone.

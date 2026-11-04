@@ -9,7 +9,7 @@ import okhttp3.Response
 import java.util.concurrent.TimeUnit
 
 data class FeedResponse(val parsed: FeedParser.Feed?, val etag: String?, val lastModified: String?,
-    val permanentUrl: String? = null)
+    val permanentUrl: String? = null, val allowAddressChange: Boolean = true)
 
 class FeedClient(private val client: OkHttpClient = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS)
     .readTimeout(30, TimeUnit.SECONDS).callTimeout(3, TimeUnit.MINUTES).build()) {
@@ -29,15 +29,18 @@ class FeedClient(private val client: OkHttpClient = OkHttpClient.Builder().conne
             }
             try {
                 call.execute().use { response ->
+                    // A later HTTPS hop cannot restore trust in redirects or XML received over HTTP.
+                    val allowAddressChange = !call.request().url.isHttps ||
+                        generateSequence(response) { it.priorResponse }.all { it.request.url.isHttps }
                     val moved = permanentRedirect(response)
                     if (response.code == 304) {
                         check(etag != null || modified != null) { "Feed returned Not Modified without a cached version" }
-                        FeedResponse(null, response.header("ETag") ?: etag, response.header("Last-Modified") ?: modified, moved)
+                        FeedResponse(null, response.header("ETag") ?: etag, response.header("Last-Modified") ?: modified, moved, allowAddressChange)
                     } else {
                         check(response.isSuccessful) { "Feed server returned HTTP ${response.code}" }
                         val body = requireNotNull(response.body) { "Feed server returned no content" }
                         val parsed = body.byteStream().use { FeedParser.parse(it, response.request.url.toString()) }
-                        FeedResponse(parsed, response.header("ETag"), response.header("Last-Modified"), moved)
+                        FeedResponse(parsed, response.header("ETag"), response.header("Last-Modified"), moved, allowAddressChange)
                     }
                 }
             } finally { cancellation.cancel() }

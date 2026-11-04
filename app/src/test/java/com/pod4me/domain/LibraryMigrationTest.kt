@@ -23,6 +23,7 @@ class LibraryMigrationTest {
     @Test fun upgradesVersionSixPreservingAudioAndHistory() { checkUpgrade(6) }
 
     @Test fun upgradesVersionSevenPreservingLibrary() { checkUpgrade(7) }
+    @Test fun upgradesVersionEightPreservingLibraryAndRefetchingMoveMetadata() { checkUpgrade(8) }
 
     @Test fun versionEightCapsOnlyDownloadedHeardDeadlinesWithoutExtendingEarlierOnes() {
         val context = RuntimeEnvironment.getApplication()
@@ -61,7 +62,8 @@ class LibraryMigrationTest {
         val file = context.getDatabasePath("pod4me.db")
         file.parentFile!!.mkdirs()
         SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
-            val artwork = (if (oldVersion >= 2) ", artwork_url TEXT" else "") + (if (oldVersion >= 3) ", subscribed INTEGER NOT NULL DEFAULT 1" else "")
+            val artwork = (if (oldVersion >= 2) ", artwork_url TEXT" else "") + (if (oldVersion >= 3) ", subscribed INTEGER NOT NULL DEFAULT 1" else "") +
+                (if (oldVersion >= 8) ", etag TEXT, last_modified TEXT, last_refreshed INTEGER" else "")
             db.execSQL("CREATE TABLE feeds(id TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, name TEXT NOT NULL, expiry_days INTEGER, error TEXT$artwork)")
             val rest = context.assets.open("schema.sql").bufferedReader().use { it.readText() }.substringAfter(';')
                 .let { if (oldVersion < 5) it.replace(", new_in_last_refresh INTEGER NOT NULL DEFAULT 0 CHECK(new_in_last_refresh IN (0,1))", "") else it }
@@ -70,6 +72,7 @@ class LibraryMigrationTest {
                 .let { if (oldVersion < 4) it.replace(", manager_id INTEGER", "") else it }
             rest.split(';').map(String::trim).filter(String::isNotEmpty).forEach(db::execSQL)
             db.execSQL("INSERT INTO feeds(id,url,name,expiry_days) VALUES('f','https://example.com/feed','My name',30)")
+            if (oldVersion >= 8) db.execSQL("UPDATE feeds SET etag='v1',last_modified='date',last_refreshed=123")
             db.execSQL("INSERT INTO episodes(id,feed_id,guid,title,audio_url,description,published,path,position,stars) VALUES('e','f','guid','Saved','https://example.com/audio','',0,'/audio',42000,5)")
             db.execSQL("INSERT INTO memberships VALUES('e','4ever')")
             db.execSQL("INSERT INTO bookmarks(episode_id,position,name) VALUES('e',1000,'Keep')")
@@ -79,7 +82,11 @@ class LibraryMigrationTest {
         val helper = LibraryDatabase(context)
         try {
             val db = helper.writableDatabase
-            assertEquals(8, db.version)
+            assertEquals(9, db.version)
+            db.rawQuery("SELECT etag,last_modified,last_refreshed,unsubscribed_move_url FROM feeds", null).use {
+                assertTrue(it.moveToFirst()); assertTrue(it.isNull(0)); assertTrue(it.isNull(1)); assertTrue(it.isNull(3))
+                if (oldVersion >= 8) assertEquals(123L, it.getLong(2))
+            }
             db.rawQuery("SELECT name,subscribed,artwork_url FROM feeds", null).use {
                 assertTrue(it.moveToFirst()); assertEquals("My name", it.getString(0)); assertEquals(1, it.getInt(1))
             }

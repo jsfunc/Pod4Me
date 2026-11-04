@@ -16,6 +16,34 @@ import java.io.IOException
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = Application::class)
 class FeedRefreshTest {
+    @Test fun secureFeedWithAnyCleartextHopCannotAuthorizeAddressChanges() = runBlocking {
+        for (middleScheme in listOf("http", "https")) for (finalScheme in listOf("http", "https")) {
+            for (code in listOf(200, 304)) {
+                val client = FeedClient(OkHttpClient.Builder().addInterceptor { chain ->
+                    fun response(url: String, status: Int, prior: Response? = null) = Response.Builder()
+                        .request(Request.Builder().url(url).build()).protocol(Protocol.HTTP_1_1)
+                        .code(status).message("Test").priorResponse(prior)
+                    val first = response(chain.request().url.toString(), 301).build()
+                    val middle = response("$middleScheme://example.com/middle", 308, first).build()
+                    response("$finalScheme://example.com/final", code, middle).body((if (code == 304) "" else
+                        "<rss xmlns:itunes='http://www.itunes.com/dtds/podcast-1.0.dtd'><channel><title>Still readable</title>" +
+                        "<itunes:new-feed-url>https://attacker.example/rss</itunes:new-feed-url></channel></rss>").toResponseBody()).build()
+                }.build())
+                val result = client.refresh(feed().copy(etag = "v1"))
+                assertEquals("$middleScheme/$finalScheme/$code", middleScheme == "https" && finalScheme == "https", result.allowAddressChange)
+                if (code == 200) assertEquals("Still readable", result.parsed!!.title())
+            }
+        }
+    }
+
+    @Test fun originallyHttpFeedStillAllowsPublisherMoves() = runBlocking {
+        val client = FeedClient(OkHttpClient.Builder().addInterceptor { chain ->
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                .body("<rss><channel><title>HTTP feed</title></channel></rss>".toResponseBody()).build()
+        }.build())
+        assertTrue(client.refresh(feed().copy(url = "http://example.com/feed")).allowAddressChange)
+    }
+
     private fun feed(id: String = "1") = Feed(id, "https://example.com/$id", "Feed $id", 30)
     @Test fun conditionalRequestAcceptsEmpty304AndPreservesValidators() = runBlocking {
         val original = feed().copy(etag = "\"v1\"", lastModified = "Mon, 02 Nov 2026 10:00:00 GMT")

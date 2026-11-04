@@ -67,6 +67,19 @@ class SchemaTests(unittest.TestCase):
         for path in (ROOT / "app/src/main").rglob("*.xml"):
             ET.parse(path)
 
+    def test_move_notice_migration_preserves_library_and_invalidates_validators(self):
+        with sqlite3.connect(":memory:") as old:
+            old.executescript((ROOT / "app/src/main/assets/schema.sql").read_text().replace(", unsubscribed_move_url TEXT", ""))
+            old.execute("INSERT INTO feeds(id,url,name,etag,last_modified,last_refreshed) VALUES('f','https://example.com/rss','My name','v1','date',123)")
+            old.execute("INSERT INTO episodes(id,feed_id,guid,title,audio_url,description,published,path,stars,position) VALUES('e','f','g','Saved','https://example.com/audio','Notes',1,'/audio',5,42000)")
+            old.execute("INSERT INTO memberships VALUES('e','4ever')")
+            old.execute("INSERT INTO queue VALUES('e',0)")
+            old.executescript((ROOT / "app/src/main/assets/migration_8_9.sql").read_text())
+            self.assertEqual(('My name', None, None, 123, None), old.execute("SELECT name,etag,last_modified,last_refreshed,unsubscribed_move_url FROM feeds").fetchone())
+            self.assertEqual(('/audio', 5, 42000), old.execute("SELECT path,stars,position FROM episodes").fetchone())
+            self.assertEqual([('e', '4ever')], old.execute("SELECT * FROM memberships").fetchall())
+            self.assertEqual([('e', 0)], old.execute("SELECT * FROM queue").fetchall())
+
     def test_refresh_marker_migration_preserves_library_and_defaults_to_old(self):
         with sqlite3.connect(":memory:") as old:
             old.executescript((ROOT / "app/src/main/assets/schema.sql").read_text().replace(

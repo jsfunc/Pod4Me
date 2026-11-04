@@ -1,7 +1,8 @@
 package com.pod4me.domain
 
 data class Feed(val id: String, val url: String, val name: String, val expiryDays: Int?, val defaults: Set<String> = emptySet(), val error: String? = null, val artworkUrl: String? = null, val subscribed: Boolean = true,
-    val etag: String? = null, val lastModified: String? = null, val lastRefreshed: Long? = null) {
+    val etag: String? = null, val lastModified: String? = null, val lastRefreshed: Long? = null,
+    val unsubscribedMoveUrl: String? = null) {
     val isYouTube get() = YouTubeChannels.isYouTube(url)
 }
 data class Episode(
