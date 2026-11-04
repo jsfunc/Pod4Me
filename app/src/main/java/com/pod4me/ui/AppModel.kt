@@ -21,6 +21,7 @@ import java.io.File
 import kotlin.math.roundToLong
 
 data class ImportPreview(val entries: List<SubscriptionFormat.Entry>, val already: Int, val invalid: Int, val duplicates: Int)
+data class ImportUi(val completed: Int = 0, val total: Int = 0, val running: Boolean = false)
 data class SubscriptionSearch(val items: List<PodcastRecommendation> = emptyList(), val loading: Boolean = false, val message: String? = null)
 data class RefreshUi(val completed: Int = 0, val total: Int = 0, val running: Boolean = false, val failedIds: List<String> = emptyList())
 data class StorageUi(val usedGb: Long = 0, val freeGb: Long = 0)
@@ -59,6 +60,8 @@ class AppModel(application: Application) : AndroidViewModel(application) {
     val subscriptionSearch = mutableSearch.asStateFlow()
     private val mutableImport = MutableStateFlow<ImportPreview?>(null)
     val importPreview = mutableImport.asStateFlow()
+    private val mutableImportProgress = MutableStateFlow(ImportUi())
+    val importProgress = mutableImportProgress.asStateFlow()
     private val mutableRefresh = MutableStateFlow(RefreshUi())
     val refreshState = mutableRefresh.asStateFlow()
     fun clearSearch() { mutableSearch.value = SubscriptionSearch() }
@@ -135,13 +138,18 @@ class AppModel(application: Application) : AndroidViewModel(application) {
     private suspend fun subscribeNow(url: String, title: String? = null): String {
         if (YouTubeChannels.isYouTube(url)) return store.subscribeYouTube(url, title)
         val normalized = discoveryClient.resolveAppleUrl(url.trim()) ?: FeedParser.httpUrl(url.trim())
-        val known = library.value.feeds.any { it.url == normalized }
-        val id = store.saveFeed(normalized, app.feeds.fetch(normalized))
-        if (!known && !title.isNullOrBlank()) {
-            library.value.feeds.firstOrNull { it.id == id }?.let { store.editFeed(id, title, it.expiryDays, it.defaults) }
-        }
-        return id
+        return requireNotNull(store.saveSubscription(normalized, app.feeds.fetch(normalized), title))
     }
+    private suspend fun importSubscription(entry: SubscriptionFormat.Entry): Boolean {
+        val source = entry.url()
+        val url = if (YouTubeChannels.isYouTube(source)) YouTubeChannels.normalize(source)
+            else discoveryClient.resolveAppleUrl(source) ?: FeedParser.httpUrl(source)
+        if (library.value.subscriptions.any { it.url == url }) return false
+        val parsed = if (YouTubeChannels.isYouTube(url)) FeedParser.Feed(YouTubeChannels.defaultName(url), emptyList())
+            else app.feeds.fetch(url)
+        return store.saveSubscription(url, parsed, entry.title(), skipSubscribed = true) != null
+    }
+
     fun importFeeds(uri: Uri) = network {
         val entries = withContext(Dispatchers.IO) {
             requireNotNull(app.contentResolver.openInputStream(uri)).use { SubscriptionFormat.parse(it.readNBytes(SubscriptionFormat.MAX_BYTES + 1)) }
@@ -152,18 +160,15 @@ class AppModel(application: Application) : AndroidViewModel(application) {
     fun confirmImport() = network {
         val preview = mutableImport.value ?: return@network
         mutableImport.value = null
-        var added = 0; var skipped = preview.already
-        val failed = mutableListOf<String>()
-        for (entry in preview.entries) {
-            try {
-                if (library.value.subscriptions.any { it.url == entry.url() }) { skipped++; continue }
-                subscribeNow(entry.url(), entry.title()); added++
-            } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { failed += "${entry.url()}: ${e.message}" }
-        }
-        mutableNotice.value = "$added added, $skipped already subscribed, ${preview.invalid} invalid" +
-            if (failed.isEmpty()) "" else ". Failed:\n${failed.joinToString("\n")}"
+        try {
+            val result = com.pod4me.data.SubscriptionImporter(::importSubscription).run(preview.entries) { done, total ->
+                mutableImportProgress.value = ImportUi(done, total, running = true)
+            }
+            mutableNotice.value = "${result.added} added, ${result.skipped + preview.already} already subscribed, ${preview.invalid} invalid" +
+                if (result.failures.isEmpty()) "" else ". Failed:\n${result.failures.joinToString("\n")}"
+        } finally { mutableImportProgress.value = mutableImportProgress.value.copy(running = false) }
     }
+
     fun exportFeeds(uri: Uri, opml: Boolean = false) = action {
         val feeds = library.value.subscriptions.filter { !opml || !it.isYouTube }
         val text = if (opml) SubscriptionFormat.opml(feeds.map { SubscriptionFormat.Entry(it.url, it.name) })

@@ -70,6 +70,7 @@ fun PodApp(model: AppModel) {
     val notice by model.notice.collectAsStateWithLifecycle()
     val downloadConfirmation by model.downloadConfirmation.collectAsStateWithLifecycle()
     val refresh by model.refreshState.collectAsStateWithLifecycle()
+    val importing by model.importProgress.collectAsStateWithLifecycle()
     val importPreview by model.importPreview.collectAsStateWithLifecycle()
     val suggestion by model.suggestion.collectAsStateWithLifecycle()
     var page by rememberSaveable { mutableStateOf("Library") }
@@ -102,7 +103,11 @@ fun PodApp(model: AppModel) {
                     TopAppBar(title = {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("Pod4Me", fontWeight = FontWeight.Bold, maxLines = 1)
-                            Text(if (refresh.running) "Refreshing ${refresh.completed}/${refresh.total}" else "used: ${storage.usedGb} - free: ${storage.freeGb} GB",
+                            Text(when {
+                                importing.running -> "Importing ${importing.completed}/${importing.total}"
+                                refresh.running -> "Refreshing ${refresh.completed}/${refresh.total}"
+                                else -> "used: ${storage.usedGb} - free: ${storage.freeGb} GB"
+                            },
                                 modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
@@ -277,7 +282,7 @@ fun PodApp(model: AppModel) {
         editingFeed?.let { feed -> if (feed.isYouTube) TextInputDialog("Rename YouTube channel", "Channel name", feed.name, "Save", busy,
             onDismiss = { editingFeed = null }, onSave = { name -> model.action {
                 model.store.editFeed(feed.id, name, feed.expiryDays, feed.defaults); editingFeed = null
-            } }) else FeedEditDialog(feed, library.lists, positions, onDismiss = { editingFeed = null }) { name, days, defaults ->
+            } }) else FeedEditDialog(library.feeds.firstOrNull { it.id == feed.id } ?: feed, library.lists, positions, onDismiss = { editingFeed = null }) { name, days, defaults ->
             model.action { model.store.editFeed(feed.id, name, days, defaults); editingFeed = null }
         } }
         unsubscribingFeed?.let { feed -> AlertDialog(
@@ -863,7 +868,8 @@ private fun FeedEditDialog(feed: Feed, lists: List<TrackList>, positions: Scroll
         Column(Modifier.heightIn(max = 520.dp).verticalScroll(positions.scroll("feed-settings:${feed.id}")), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (feed.url.isNotBlank()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Feed URL", style = MaterialTheme.typography.labelSmall)
+                    Text(feed.lastRefreshed?.let { "Last refreshed: ${DateTimeFormatter.ofPattern("d MMM yyyy HH:mm").withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(it))}" }
+                        ?: "No refresh recorded", style = MaterialTheme.typography.labelSmall)
                     SelectionContainer { Text(feed.url, style = MaterialTheme.typography.bodySmall,
                         maxLines = 2, overflow = TextOverflow.Ellipsis) }
                 }
@@ -1020,12 +1026,13 @@ private fun MiniPlayer(library: Library, model: AppModel, onOpen: () -> Unit) {
                 Icon(painterResource(R.drawable.ic_live), contentDescription = null)
                 Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                     Text(playback.radioName.orEmpty(), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(radioStatus(playback), style = MaterialTheme.typography.labelSmall)
+                    Text(radioStatus(playback), style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                ActionIcon(if (playback.playing) R.drawable.ic_stop else R.drawable.ic_play,
-                    if (playback.playing) "Stop radio" else "Play live", onClick = { model.action {
-                        if (playback.playing) model.player.stop() else model.player.toggle()
-                    } })
+                ActionIcon(if (playback.playing) R.drawable.ic_pause else R.drawable.ic_play,
+                    if (playback.playing) "Pause radio" else if (playback.ended) "Replay buffered radio" else "Resume radio",
+                    enabled = playback.connected, onClick = { model.action { model.player.toggle() } })
+                ActionIcon(R.drawable.ic_stop, "Stop radio and clear buffer", enabled = playback.connected,
+                    onClick = { model.action { model.player.stop() } })
             }
         }
         return

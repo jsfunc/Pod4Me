@@ -5,6 +5,7 @@ import android.os.Environment
 import com.pod4me.data.LibraryDatabase
 import com.pod4me.data.LibraryStore
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.After
@@ -20,6 +21,47 @@ import java.io.File
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = Application::class)
 class LibraryStoreTest {
+    @Test fun concurrentImportAliasesCommitOneNameAndNeverOverwriteExistingHistory() = runBlocking {
+        val parsed = FeedParser.Feed("Publisher", listOf(FeedParser.Item("new", "New", "https://example.com/new.mp3", "", 1, 10000)))
+        val url = "https://example.com/imported"
+        val results = kotlinx.coroutines.coroutineScope {
+            listOf("First name", "Alias name").map { name -> async {
+                store.saveSubscription(url, parsed, name, skipSubscribed = true, now = 100)
+            } }.map { it.await() }
+        }
+        assertEquals(1, results.count { it != null })
+        val id = results.filterNotNull().single()
+        val ep = store.library.value.episodes.single { it.feedId == id }
+        store.editFeed(id, "My custom name", 17, setOf("4ever"))
+        store.progress(ep.id, 1234, 10000); store.rate(ep.id, 4); store.bookmark(ep.id, 1234, "Keep")
+        val before = store.library.value
+        assertNull(store.saveSubscription(url, parsed, "Replace?", skipSubscribed = true, now = 200))
+        assertEquals(before, store.library.value)
+        store.unsubscribe(id)
+        assertEquals(id, store.saveSubscription(url, parsed, "Imported title", skipSubscribed = true, now = 300))
+        val restored = store.library.value.feeds.single { it.id == id }
+        assertEquals("My custom name", restored.name); assertEquals(17, restored.expiryDays)
+        assertEquals(setOf("4ever"), restored.defaults); assertEquals(300L, restored.lastRefreshed)
+        assertEquals(1234L, store.library.value.episode(ep.id)!!.position)
+        assertEquals(4, store.library.value.episode(ep.id)!!.stars); assertEquals(1, store.library.value.bookmarks.size)
+    }
+
+    @Test fun freshnessRecordsSuccessfulFetchesIncluding304ButNotFailureOrBundledChannels() = runBlocking {
+        val feed = store.library.value.subscriptions.single()
+        assertNull(feed.lastRefreshed)
+        store.saveSubscription(feed.url, FeedParser.Feed("Publisher name", emptyList()), now = 100)
+        val subscribed = store.library.value.subscriptions.single()
+        assertEquals(100L, subscribed.lastRefreshed)
+        store.applyRefresh(subscribed, com.pod4me.data.FeedResponse(null, "v1", "date"), 200)
+        store.feedError(feed.id, "Offline")
+        assertEquals(200L, store.library.value.subscriptions.single().lastRefreshed)
+        store.saveSubscription(feed.url, FeedParser.Feed("Publisher", emptyList()), now = 300)
+        val fetched = store.library.value.subscriptions.single()
+        assertEquals(300L, fetched.lastRefreshed); assertNull(fetched.etag); assertNull(fetched.lastModified)
+        store.saveSubscription("https://www.youtube.com/@channel", FeedParser.Feed("Channel", emptyList()), "My channel", skipSubscribed = true)
+        assertNull(store.library.value.subscriptions.single { it.isYouTube }.lastRefreshed)
+    }
+
     @Test fun moveToUnsubscribedAddressRefreshesWithoutMergingEitherHistory() = runBlocking {
         val original = store.library.value.subscriptions.single()
         val targetData = FeedParser.Feed("Old destination", listOf(FeedParser.Item("target", "Target episode", "https://example.com/target.mp3", "", 2, 10000)))

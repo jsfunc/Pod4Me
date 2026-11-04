@@ -182,15 +182,28 @@ class LibraryStore(private val context: Context) : AutoCloseable {
             "last_modified" to if (differentResource) null else response.lastModified, "last_refreshed" to now), "id=?", arrayOf(feed.id))
     }
 
+    /** Network subscriptions record freshness; bundled/backup data must not claim a successful fetch.
+     * The subscription check and first name are committed together, including concurrent import aliases. */
+    suspend fun saveSubscription(url: String, parsed: FeedParser.Feed, title: String? = null,
+        skipSubscribed: Boolean = false, now: Long = System.currentTimeMillis()): String? = write { db ->
+        if (skipSubscribed && db.rows("SELECT subscribed FROM feeds WHERE url=?", url) { it.long("subscribed") }.firstOrNull() == 1L)
+            return@write null
+        val id = saveFeed(db, url, parsed, newName = title)
+        if (!com.pod4me.domain.YouTubeChannels.isYouTube(url)) {
+            db.update("feeds", values("last_refreshed" to now, "etag" to null, "last_modified" to null), "id=?", arrayOf(id))
+        }
+        id
+    }
+
     suspend fun saveFeed(url: String, parsed: FeedParser.Feed, existingId: String? = null): String = write { db -> saveFeed(db, url, parsed, existingId) }
-    private fun saveFeed(db: SQLiteDatabase, url: String, parsed: FeedParser.Feed, existingId: String? = null): String {
+    private fun saveFeed(db: SQLiteDatabase, url: String, parsed: FeedParser.Feed, existingId: String? = null, newName: String? = null): String {
         val known = db.rows("SELECT id FROM feeds WHERE url=?", url) { it.str("id") }.firstOrNull()
         val id = existingId ?: known ?: UUID.randomUUID().toString()
         // A refresh already in flight must not undo a subsequent unsubscribe.
         if (existingId != null && db.rows("SELECT subscribed FROM feeds WHERE id=?", id) { it.long("subscribed") }.firstOrNull() != 1L)
             return id
         if (existingId == null && known == null) db.insertOrThrow("feeds", null,
-            values("id" to id, "url" to url, "name" to parsed.title(), "expiry_days" to 30))
+            values("id" to id, "url" to url, "name" to (newName?.trim()?.takeIf(String::isNotEmpty)?.take(FeedParser.MAX_TITLE_CHARS) ?: parsed.title()), "expiry_days" to 30))
         db.update("feeds", values("error" to parsed.skippedItems().takeIf { it > 0 }?.let { "$it episode(s) skipped: no supported, valid audio/video enclosure" }, "artwork_url" to parsed.artworkUrl().takeIf { it.isNotBlank() }), "id=?", arrayOf(id))
         if (existingId == null) db.update("feeds", values("subscribed" to 1), "id=?", arrayOf(id))
         // Replace only this feed's previous successful refresh markers, atomically
