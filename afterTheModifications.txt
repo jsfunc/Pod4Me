@@ -11,37 +11,37 @@ PARTIAL = part of the finding remains; NOT ADDRESSED; NEW = problem introduced b
 modifications; NEEDS PHONE = only a device test can settle it.
 
 
-OPEN ITEMS (as of round 3, commit b6d075b, 1.0.24 / code 32)
+OPEN ITEMS (as of round 4, commit f1da573, 1.0.27 / code 35)
 ============================================================
-No blocking issue. Nothing must be fixed before the phone tests.
-Small fixes
-  N12b LOW (security)  Remainder of N12. If any hop of a secure feed's fetch was cleartext (the
-              https host redirects to http), that cleartext body or an injected 301 can still
-              move the subscription to any HTTPS address chosen by a network attacker (probe
-              Q7). Only a direct https→http move is refused.
-Information and polish
-  N14 INFO    N10 as decided: when a feed's new-feed-url points to a previously unsubscribed
-              address, the old address is kept silently. If the publisher then freezes the old
-              feed, new episodes stop arriving with no hint why.
-  N15 INFO    Radio startup error wording repeats itself and has a capital letter mid-sentence
-              ("Could not play X: Use the station's direct audio URL… Check the connection or
-              direct stream URL…").
+No bug or security issue is open. The code is ready for the phone tests.
+Information and polish (optional)
+  N16 INFO    With the 10-minute window, a pause taken while behind live loses its resume
+              point after (10 min − time behind live), not after 10 min. Resume then plays the
+              oldest audio, with the "paused position expired" notice. This is by design, but
+              more noticeable than with 30 min.
+  N17 INFO    Relative seek slider: at the live edge, the right half does nothing ("Current
+              position"). The left and right halves use different time scales.
+  N18 INFO    Minor: the paused-radio wake-lock timeout equals the pause cap exactly; give it a
+              small margin. Download progress is collected at the PodApp root, so the whole tree
+              re-runs every 2 s while downloading. TLS errors show raw text in radio messages.
   N13h        Still open for discussion: skip silence, accent folding in the station picker,
               disabling the video track without a surface, splitting PodApp.kt.
 Kept by user decision
-  N8  Mark Unheard keeps the shortened Heard deadline (handover, after round 2).
-  N10 A move to a previously unsubscribed address keeps the current address (both histories
-      kept).
+  N8  Mark Unheard keeps the shortened Heard deadline.
+  N10 A move to a previously unsubscribed address keeps the current address. The notice in
+      feed settings now covers N14.
   N3  Replay from the start of a finished radio window (explicit Back to live).
   L9  Keys not cached (key rotation).   S1, S2  Unchanged (2026-11-01).
 Not addressed
   L8, L10, L11 (performance and quality items, not bugs or security).
-Needs a phone (nothing in rounds 1–3 was tested on a device)
+Needs a phone (nothing in rounds 1–4 was tested on a device by the reviewer)
   H1 / N5     Radio outage and recovery: Wi-Fi off; Icecast/HLS hiccups; captive portal.
-  Device checks 53 and 59–64: pause limit/replay, sleep timer with the screen off and at the
-              end of the queue, fullscreen video, import progress, mini-player Pause/Stop.
+  Device checks 53, 59–64 and 74: pause limit (now 11 minutes to test), replay, sleep timer with
+              the screen off, fullscreen video, import progress, mini-player, download
+              progress labels, and the centered radio seek slider.
 Closed in round 2: N1, N2, N4, L4.
-Closed in round 3: N5, N6, N7, N9, N11, N12 (direct downgrade; see N12b), N13a–g; N10 as decided.
+Closed in round 3: N5, N6, N7, N9, N11, N12 (direct downgrade), N13a–g; N10 as decided.
+Closed in round 4: N12b, N14, N15.
 
 
 ROUND 1 — 2026-11-04, 17:02 snapshot
@@ -680,3 +680,129 @@ N12b (LOW, security). N14 and N15 are polish. From the code side, the app is rea
 pending phone tests: H1/N5 radio outages, the pause limit and Replay, the screen-off sleep
 timer, fullscreen video, import progress and mini-player Pause/Stop (checks 53, 59–64).
 Nothing in this round was tested on a phone.
+
+
+ROUND 4 — 2026-11-04, commits 78443e8, a08a68e, f1da573
+=======================================================
+Code state tested
+-----------------
+  HEAD f1da573, "Center radio seeking and limit the buffer to ten minutes" (22:05), on top of:
+    - a08a68e, "Show download progress and Android waiting states" (22:00);
+    - 78443e8, "Protect feed moves across HTTP hops and clarify playback notices" (21:32).
+  Version 1.0.27 / versionCode 35 (gradle and build-apk.sh agree), SQLite schema 9
+  (migration_8_9.sql), backup 2.
+  The snapshot was taken from the working tree at 22:04:48, before f1da573 was committed. Its
+  app/ and tools/ sources are byte-identical to f1da573 (diff -r, excluding build output), so
+  every result applies to the commit. Round 3 was committed unchanged.
+  Code changed:
+    - FeedClient, LibraryStore and Models: no address change after a cleartext hop; the
+      unsubscribed-move notice;
+    - new RadioErrors, RadioBuffer and PlaybackService: radio error wording; the 10-minute
+      constant;
+    - new DownloadStatus, MainActivity and PodApp: download progress / waiting reasons, a 2-s
+      poll, Cancel in Queue;
+    - RadioWindow: the shared RADIO_BUFFER_MS / RADIO_BUFFER_MINUTES constants;
+    - PlayerClient.seekRelative, the new RadioSeek, RadioScreen: centered relative slider;
+    - check_schema.py: an 8→9 migration test.
+
+Executed
+--------
+  java tools/CoreTestLauncher.java ............ PASS, 139 core checks
+  python3 -I tools/check_schema.py ............ PASS, 12 schema/XML checks (new: 8→9 keeps
+                                               names, paths, ratings, position, 4ever, queue;
+                                               clears validators)
+  ./gradlew :app:testDebugUnitTest :app:lintRelease --rerun-tasks --offline (fresh build)
+      unit tests ............................. PASS, 175 tests, 0 failures/errors/skips
+      release lint ........................... 0 errors, 26 warnings offline. No new warning
+                                               types.
+  Reviewer probes (scratch snapshot only):
+      R1, new, through the real FeedClient (an interceptor returns crafted redirect histories),
+      then applyRefresh:
+        https→http 301, body new-feed-url → https://attacker ...... allowAddressChange=false,
+                                                                     kept https://s1…/feed
+        https 301 → http 301 → https://attacker ................... allowAddressChange=false,
+                                                                     kept https://s2…/feed
+        all-https 301 + new-feed-url (legitimate move) ............ moved to the new-feed-url
+        http subscription + new-feed-url .......................... moved (S2 policy unchanged)
+      Q1/Q3/Q4/Q5/Q6 rerun: same results as round 3. Capture survives a mid-broadcast 404,
+      portal HTML and a segment 404; statuses are not masked; Q5 has no error; Q6 is unchanged
+      by decision. Q7 calls applyRefresh directly with the default allowAddressChange=true, so
+      it no longer models the real path; R1 replaces it.
+Not executed: release assembly/signing, instrumented tests, any phone. ADB lists no device.
+
+Verdicts
+--------
+N12b Cleartext hop can move a secure feed ................... FIXED (R1, plus repo tests)
+     FeedClient sets allowAddressChange=false when the subscription is https and any response
+     in the redirect history was http. applyRefresh then ignores both new-feed-url and
+     permanentUrl, and still uses the content. A later https hop cannot restore trust.
+     Legitimate all-https moves still work.
+N14  Silent kept address after a move to an unsubscribed feed  FIXED
+     The new nullable column unsubscribed_move_url (schema 9, additive) drives a non-error line
+     in feed settings. A 304 keeps the notice; a full refresh that no longer proposes the move
+     clears it. Migration 8→9 also clears every validator once, which costs one full refresh
+     per feed and is harmless.
+N15  Radio error wording ...................................... FIXED
+     RadioHttpException keeps the HTTP code, so the old message-string parsing is gone. Known
+     causes now get short phrases: DNS, timeout, connect, 401/403, 404/410, 408/504, 429, 5xx,
+     and a web page. Only 4xx other than 408/429 is permanent, and only before audio. Example:
+     "Could not play X. This address is a web page. Use the station's direct audio URL. Tap
+     Play to retry." Other exceptions, such as TLS errors, still show their raw text (N18).
+
+Review of the new behaviour
+---------------------------
+Download progress and Android waiting states (a08a68e) ...... GOOD
+    While a download is pending and the app is in the foreground, the poll runs every 2 s
+    instead of 10 s, without checking every downloaded file (checkFiles=false). The full file
+    check still runs at foreground maintenance. Progress lives in a separate StateFlow, so
+    there are no SQLite writes and no library snapshots per update (write() republishes only
+    when rows change).
+    The labels never claim queued or paused work is running, including "Waiting for Wi-Fi"
+    for the M3 large-download case and "Connection interrupted · Android will retry". Queue now
+    offers Cancel for an active download. Placeholder: "Queued by Android" can show for up to
+    2 s before the first poll.
+10-minute radio buffer (f1da573) ............................ CONSISTENT
+    The window length, pause cap and wake-lock timeout share RADIO_BUFFER_MS. The status
+    texts and the "up to N minutes" line use RADIO_BUFFER_MINUTES. The window test was updated
+    (300 segments / 600 s). No 30-minute value remains in app/src/main. The 128 MiB byte cap is
+    now far from binding (10 min at 320 kbps ≈ 24 MB). The handover records the change and
+    says to test the pause cap at 11 minutes. See N16.
+Centered relative seek slider (f1da573) ..................... GOOD, see N17
+    The slider sits at the centre during playback and pause, so ordinary playback ticks never
+    seek. Each drag freezes the available distance on each side (RadioSeek). On release, the
+    offset is applied to the controller's current position and clamped to its current window,
+    so a window that slides during the drag cannot cause a stale absolute seek. Tested by
+    RadioSeekTest. The preview reads "Rewind m:ss" / "Forward m:ss", and the stateDescription
+    gives TalkBack the same.
+
+New observations (all INFO; none blocks the phone tests)
+--------------------------------------------------------
+N16 INFO  A shorter window shortens a paused resume point's life
+    The paused position is lost after (10 min − time behind live at the pause), not after 10
+    min. For example, pausing 6 min behind live keeps the exact resume point for only 4 min.
+    Resume then starts at the oldest audio, with the existing notice. This is unchanged
+    behaviour and acceptable, but more visible now. Options:
+      - state it in the status line once paused for that long ("Resume point expired ·
+        playing the oldest retained audio");
+      - stop capture as soon as the paused position is about to be evicted, to save data.
+N17 INFO  Relative slider asymmetry
+    At the live edge the right half is inert, and away from it the two halves map different
+    durations. Consider disabling the right half visually when position ≈ duration, or
+    labelling the ends ("−m:ss" / "Live").
+N18 INFO  Small items
+    a) The paused-radio wake-lock timeout equals the pause cap. A ~1-min margin guarantees the
+       cap job runs while the lock is still held.
+    b) PodApp collects downloadStatuses at its root, so the whole tree re-runs every 2 s while
+       a download moves. Collect it in the list, Queue and Player composables only.
+    c) radioFailureReason passes through raw messages for unclassified errors, such as
+       SSLHandshakeException ("Chain validation failed"). Add "Secure connection to the
+       station failed".
+
+Round 4 conclusion
+------------------
+N12b, N14 and N15 are fixed, and N12b is now proven end to end through the real HTTP client.
+Download progress, the 10-minute buffer and the centered seek slider are consistent and
+covered by tests. Checks pass: 139 core, 12 schema, 175 unit tests, and lint has 0 errors. No
+bug or security issue is open in the reviewed code. What remains is optional polish (N16–N18,
+N13h) and the phone acceptance checks listed under OPEN ITEMS. Nothing in this round was tested
+on a phone.

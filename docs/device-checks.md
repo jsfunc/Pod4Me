@@ -232,3 +232,6 @@ Report checklist numbers with PASS/FAIL, your phone/Android version, and any exa
 
 
 2026-11-04 user feedback after delivery of 1.0.27: “looks ok”. Recorded as positive general feedback on the update. The user did not identify individual checklist results, installed version, timing, network conditions or device details. This does not establish completion of the 10-minute retention/pause-cap test, outage recovery, screen-off timer or other longer acceptance checks; no agent-side phone test was performed.
+
+
+1.2.0 release verification (not a device result): Canonical `JAVA_HOME=/home/aurelien/android-studio/jbr ./tools/build-apk.sh` passed in **2m 1s**: **139 core checks, 12 schema/XML checks, 175 unit tests**, zero failures/errors/skips; release lint **0 errors / 37 warnings**. Release and device-test APKs compiled. Signed non-debuggable **1.2.0/code 36**, schema **9**, backup **2**. Identical `dist/Pod4Me.apk` and `dist/Pod4Me-1.2.0.apk`: **29,677,091 bytes**, SHA-256 `b9a3eda03a9a73581aa0704bcd118a4a903f2ed2411ce42b847c479702671000`. Version and preserved certificate SHA-256 `134a95237bf3ac990be2f7d1f33fdc7e9e6d16682401d3445cd9ad6fc10ff03f` independently verified. Log `/tmp/pod4me-audit-build.log`. No new phone testing; earlier general user feedback remains recorded, with detailed acceptance pending. No public deployment.
