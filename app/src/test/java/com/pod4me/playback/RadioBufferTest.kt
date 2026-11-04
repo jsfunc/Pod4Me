@@ -230,15 +230,15 @@ class RadioBufferTest {
         assertArrayEquals(original, audio)
     }
 
-    @Test fun rollingWindowKeepsThirtyMinutesAndDeletesExpiredSegments() {
+    @Test fun rollingWindowKeepsTenMinutesAndDeletesExpiredSegments() {
         val directory = File(cache, "window-expiry")
         val window = RadioWindow(directory)
         try {
-            repeat(903) { window.append(byteArrayOf(it.toByte()), 2_000_000, "mp3") }
+            repeat(303) { window.append(byteArrayOf(it.toByte()), 2_000_000, "mp3") }
             val media = playlist(window.read("live.m3u8"))
-            assertEquals(1800_000_000L, media.durationUs)
+            assertEquals(600_000_000L, media.durationUs)
             assertEquals(3L, media.mediaSequence)
-            assertEquals(900, media.segments.size)
+            assertEquals(300, media.segments.size)
             assertFalse(File(directory, "0.mp3").exists())
             assertArrayEquals(byteArrayOf(3), window.read("3.mp3"))
             assertFalse(media.hasEndTag)

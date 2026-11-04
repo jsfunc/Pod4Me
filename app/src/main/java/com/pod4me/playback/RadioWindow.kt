@@ -5,10 +5,13 @@ import java.io.IOException
 import java.util.Locale
 import kotlin.math.ceil
 
+internal const val RADIO_BUFFER_MINUTES = 10
+internal const val RADIO_BUFFER_MS = RADIO_BUFFER_MINUTES * 60_000L
+
 /** Private, bounded compressed-audio segments exposed as a seekable sliding HLS window. */
 internal class RadioWindow(
     val directory: File,
-    private val maxDurationUs: Long = 30 * 60 * 1_000_000L,
+    private val maxDurationUs: Long = RADIO_BUFFER_MS * 1000,
     private val maxBytes: Long = 128L * 1024 * 1024,
 ) {
     private data class Segment(val sequence: Long, val durationUs: Long, val name: String,

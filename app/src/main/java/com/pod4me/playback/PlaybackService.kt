@@ -330,7 +330,7 @@ class PlaybackService : MediaSessionService() {
         buffer?.setPaused(paused)
         val recording = buffer?.status?.value in setOf(RadioBuffer.Status.CAPTURING, RadioBuffer.Status.RECONNECTING)
         if (buffer != null && paused && recording) {
-            if (!pauseWakeLock.isHeld) pauseWakeLock.acquire(30 * 60_000L)
+            if (!pauseWakeLock.isHeld) pauseWakeLock.acquire(RADIO_BUFFER_MS)
         } else if (pauseWakeLock.isHeld) pauseWakeLock.release()
     }
 

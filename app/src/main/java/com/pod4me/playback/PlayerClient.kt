@@ -90,6 +90,11 @@ class PlayerClient internal constructor(
         }, ContextCompat.getMainExecutor(app))
     }
     fun seek(position: Long) { requireController().seekTo(position.coerceAtLeast(0)) }
+    fun seekRelative(offset: Long) {
+        val player = requireController()
+        if (player.duration <= 0) return
+        player.seekTo((player.currentPosition + offset).coerceIn(0, player.duration))
+    }
     fun goLive() { command(PlaybackService.GO_LIVE) }
     fun back() { requireController().seekBack() }
     fun forward() { requireController().seekForward() }

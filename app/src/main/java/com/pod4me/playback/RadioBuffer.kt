@@ -27,14 +27,14 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Capture one broadcaster into a private thirty-minute compressed-audio window. */
+/** Capture one broadcaster into a private ten-minute compressed-audio window. */
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 internal class RadioBuffer(cacheDirectory: File, url: String,
     private val http: OkHttpClient = defaultHttp,
     capture: Boolean = true,
     private val retryDelayMs: Long = 1000,
     private val retryLimit: Int = 24,
-    private val pauseLimitMs: Long = 30 * 60_000L,
+    private val pauseLimitMs: Long = RADIO_BUFFER_MS,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val closed = AtomicBoolean(false)
