@@ -21,6 +21,119 @@ import java.io.File
 @Config(sdk = [35], application = PodApplication::class)
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class PlaybackServiceTest {
+    @Test fun videoStreamingKeepsQueueAndProgressAndDownloadedVideoUsesLocalFile() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val audio = queuedEpisodes(app)
+        val feed = app.store.saveFeed("https://example.com/videos", FeedParser.Feed("Videos", listOf(
+            FeedParser.Item("v", "Video", "https://example.com/episode.mp4", "", 0, 10000, true))))
+        val video = app.store.library.value.episodes.single { it.feedId == feed }
+        app.store.progress(video.id, 2000, 10000)
+        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        try {
+            service.get().startEpisode(audio.first().id, audio.map { it.id }, 1000, play = false)
+            player(service.get()).setPlaybackSpeed(1.5f)
+            val queue = app.store.library.value.queue
+            service.get().startVideoStream(video.id, play = false)
+            assertEquals(video.audioUrl, player(service.get()).currentMediaItem!!.localConfiguration!!.uri.toString())
+            assertEquals(1, player(service.get()).mediaItemCount)
+            assertEquals(2000L, player(service.get()).currentPosition)
+            assertEquals(1.5f, player(service.get()).playbackParameters.speed)
+            assertEquals(queue, app.store.library.value.queue)
+            assertEquals(video.id, app.store.activeEpisode.get())
+            service.get().stopPlayback()
+            assertEquals(audio.first().id, app.getSharedPreferences("playback", 0).getString("current", null))
+            val local = File(app.getExternalFilesDir(Environment.DIRECTORY_PODCASTS), "${video.id}.audio")
+            local.writeBytes(byteArrayOf(1, 2, 3))
+            LibraryDatabase(app).use { it.writableDatabase.execSQL("UPDATE episodes SET path=? WHERE id=?", arrayOf(local.path, video.id)) }
+            app.store.initialize()
+            service.get().startEpisode(video.id, listOf(video.id), -1, play = false)
+            assertEquals("file", player(service.get()).currentMediaItem!!.localConfiguration!!.uri.scheme)
+            service.get().startRadio(app.radios.read().first().id, play = false)
+            assertEquals(1f, player(service.get()).playbackParameters.speed)
+            service.get().startVideoStream(video.id, play = false)
+            service.get().handlePlaybackError()
+            assertNull(app.store.activeEpisode.get())
+            assertEquals(0, player(service.get()).mediaItemCount)
+            assertTrue(app.error.value!!.contains("video stream"))
+        } finally { service.destroy() }
+    }
+
+    @Test fun radioDoesNotConsumeQueueOrOverwritePodcastSpeedAndResume() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val episodes = queuedEpisodes(app)
+        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        try {
+            val episode = episodes.first()
+            service.get().startEpisode(episode.id, episodes.map { it.id }, 2000, play = false)
+            player(service.get()).setPlaybackSpeed(1.75f)
+            val queue = app.store.library.value.queue
+            val station = app.radios.read().first()
+            service.get().startRadio(station.id, play = false)
+            assertEquals(station.id, player(service.get()).currentMediaItem!!.mediaId)
+            assertEquals(1, player(service.get()).mediaItemCount)
+            assertEquals(1f, player(service.get()).playbackParameters.speed)
+            assertNull(app.store.activeEpisode.get())
+            assertEquals(queue, app.store.library.value.queue)
+            assertEquals(2000L, app.store.library.value.episode(episode.id)!!.position)
+            assertFalse(service.get().playerCommands().contains(Player.COMMAND_SET_SPEED_AND_PITCH))
+            assertFalse(service.get().playerCommands().contains(Player.COMMAND_SEEK_FORWARD))
+            assertEquals(station, service.get().savedRadio())
+            service.get().startEpisode(episode.id, episodes.map { it.id }, -1, play = false)
+            assertEquals(1.75f, player(service.get()).playbackParameters.speed)
+            assertEquals(2000L, player(service.get()).currentPosition)
+            assertEquals(episode.id, app.store.activeEpisode.get())
+            assertTrue(service.get().playerCommands().contains(Player.COMMAND_SEEK_FORWARD))
+            assertNull(service.get().savedRadio())
+        } finally { service.destroy() }
+    }
+
+    @Test fun stopRadioUnloadsStreamAndKeepsPodcastResume() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        app.store.initialize()
+        val prefs = app.getSharedPreferences("playback", 0)
+        prefs.edit().putString("current", "last-podcast").commit()
+        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        try {
+            service.get().startRadio(app.radios.read().first().id, play = false)
+            service.get().stopPlayback()
+            assertEquals(0, player(service.get()).mediaItemCount)
+            assertNull(service.get().savedRadio())
+            assertEquals("last-podcast", prefs.getString("current", null))
+        } finally { service.destroy() }
+    }
+
+    @Test fun unavailableOrRemovedRadioCannotStartAndErrorsDoNotTouchEpisodes() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val episodes = queuedEpisodes(app)
+        val station = app.radios.read().first()
+        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        try {
+            service.get().startRadio(station.id, play = false)
+            service.get().handlePlaybackError()
+            assertEquals(0, player(service.get()).mediaItemCount)
+            assertNull(app.store.activeEpisode.get())
+            assertTrue(app.error.value!!.contains(station.name))
+            assertEquals(episodes.map { it.id }, app.store.library.value.queue)
+            assertTrue(app.store.library.value.episodes.none { it.heard })
+            app.radios.unsubscribe(station.id)
+            assertNull(service.get().savedRadio())
+            try { service.get().startRadio(station.id, play = false); fail("Removed station") }
+            catch (_: IllegalArgumentException) {}
+        } finally { service.destroy() }
+    }
+
+    @Test fun coldSessionDoesNotConnectToSavedRadioAutomatically() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val station = app.radios.read().first()
+        app.getSharedPreferences("playback", 0).edit().putString("radio", station.id).commit()
+        val service = Robolectric.buildService(PlaybackService::class.java).create()
+        try {
+            assertEquals(0, player(service.get()).mediaItemCount)
+            assertEquals(station, service.get().savedRadio())
+            assertNull(app.store.activeEpisode.get())
+        } finally { service.destroy() }
+    }
+
     @Test fun queueStartSkipsMissingAudioAndKeepsItAvailableForDownload() = runBlocking {
         val app = RuntimeEnvironment.getApplication() as PodApplication
         val episodes = queuedEpisodes(app)

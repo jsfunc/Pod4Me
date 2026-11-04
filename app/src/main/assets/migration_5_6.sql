@@ -1,0 +1,1 @@
+ALTER TABLE episodes ADD COLUMN is_video INTEGER NOT NULL DEFAULT 0 CHECK(is_video IN (0,1));

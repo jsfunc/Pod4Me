@@ -21,7 +21,7 @@ import java.io.File
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
 
-class LibraryDatabase(context: Context) : SQLiteOpenHelper(context, "pod4me.db", null, 5) {
+class LibraryDatabase(context: Context) : SQLiteOpenHelper(context, "pod4me.db", null, 6) {
     private val app = context.applicationContext
     override fun onConfigure(db: SQLiteDatabase) { db.setForeignKeyConstraintsEnabled(true) }
     override fun onCreate(db: SQLiteDatabase) { executeAsset(db, "schema.sql") }
@@ -36,6 +36,7 @@ class LibraryDatabase(context: Context) : SQLiteOpenHelper(context, "pod4me.db",
         if (version == 2 && newVersion >= 3) { executeAsset(db, "migration_2_3.sql"); version = 3 }
         if (version == 3 && newVersion >= 4) { executeAsset(db, "migration_3_4.sql"); version = 4 }
         if (version == 4 && newVersion >= 5) { executeAsset(db, "migration_4_5.sql"); version = 5 }
+        if (version == 5 && newVersion >= 6) { executeAsset(db, "migration_5_6.sql"); version = 6 }
         check(version == newVersion) { "A migration from $oldVersion to $newVersion is required" }
     }
 }
@@ -50,7 +51,7 @@ class LibraryStore(private val context: Context) : AutoCloseable {
     val activeEpisode = AtomicReference<String?>(null)
     private val progressEpochs = java.util.concurrent.ConcurrentHashMap<String, Long>()
     fun progressEpoch(id: String): Long = progressEpochs[id] ?: 0L
-    private val projection = "id,feed_id,title,audio_url,published,duration,downloaded,path,expiry,stars,position,heard,download_id,manager_id,error,new_in_last_refresh"
+    private val projection = "id,feed_id,title,audio_url,published,duration,downloaded,path,expiry,stars,position,heard,download_id,manager_id,error,new_in_last_refresh,is_video"
     private val manager = context.getSystemService(DownloadManager::class.java)
     private val directory: File get() = requireNotNull(context.getExternalFilesDir(Environment.DIRECTORY_PODCASTS)) { "Download storage is unavailable" }
 
@@ -75,6 +76,18 @@ class LibraryStore(private val context: Context) : AutoCloseable {
         }
     }
     suspend fun initialize() = write(force = true) { Unit }
+    /** Bundled metadata only: no automatic network request or media download. Unsubscribe is retained. */
+    suspend fun seedVideoSamples() = write { db ->
+        for ((name, url) in listOf(
+            "dw" to "https://rss.dw.com/xml/DKpodcast_videothema_de",
+            "twit" to "https://feeds.twit.tv/twit_video_hd.xml",
+            "hot" to "https://feeds.twit.tv/hot_video_hd.xml",
+        )) {
+            val exists = db.rawQuery("SELECT 1 FROM feeds WHERE url=?", arrayOf(url)).use { it.moveToFirst() }
+            if (!exists) context.assets.open("video-samples/$name.xml").use { saveFeed(db, url, FeedParser.parse(it, url)) }
+        }
+    }
+
     suspend fun description(id: String): String = withContext(Dispatchers.IO) {
         mutex.withLock { helper.readableDatabase.rows("SELECT description FROM episodes WHERE id=?", id) { it.str("description") }.firstOrNull().orEmpty() }
     }
@@ -119,32 +132,33 @@ class LibraryStore(private val context: Context) : AutoCloseable {
             .putString("order", org.json.JSONArray(playback.order).toString()).putInt("cursor", playback.cursor).apply()
     }
 
-    suspend fun saveFeed(url: String, parsed: FeedParser.Feed, existingId: String? = null): String = write { db ->
+    suspend fun saveFeed(url: String, parsed: FeedParser.Feed, existingId: String? = null): String = write { db -> saveFeed(db, url, parsed, existingId) }
+    private fun saveFeed(db: SQLiteDatabase, url: String, parsed: FeedParser.Feed, existingId: String? = null): String {
         val known = db.rows("SELECT id FROM feeds WHERE url=?", url) { it.str("id") }.firstOrNull()
         val id = existingId ?: known ?: UUID.randomUUID().toString()
         // A refresh already in flight must not undo a subsequent unsubscribe.
         if (existingId != null && db.rows("SELECT subscribed FROM feeds WHERE id=?", id) { it.long("subscribed") }.firstOrNull() != 1L)
-            return@write id
+            return id
         if (existingId == null && known == null) db.insertOrThrow("feeds", null,
             values("id" to id, "url" to url, "name" to parsed.title(), "expiry_days" to 30))
-        db.update("feeds", values("error" to parsed.skippedItems().takeIf { it > 0 }?.let { "$it episode(s) skipped: no supported, valid audio enclosure" }, "artwork_url" to parsed.artworkUrl().takeIf { it.isNotBlank() }), "id=?", arrayOf(id))
+        db.update("feeds", values("error" to parsed.skippedItems().takeIf { it > 0 }?.let { "$it episode(s) skipped: no supported, valid audio/video enclosure" }, "artwork_url" to parsed.artworkUrl().takeIf { it.isNotBlank() }), "id=?", arrayOf(id))
         if (existingId == null) db.update("feeds", values("subscribed" to 1), "id=?", arrayOf(id))
         // Replace only this feed's previous successful refresh markers, atomically
         // with its new metadata. Failed fetches never reach this transaction.
         db.update("episodes", values("new_in_last_refresh" to 0), "feed_id=? AND new_in_last_refresh=1", arrayOf(id))
         for (item in parsed.items()) {
             val episodeId = db.rows("SELECT id FROM episodes WHERE feed_id=? AND guid=?", id, item.guid()) { it.str("id") }.firstOrNull()
-            val metadata = values("title" to item.title(), "audio_url" to item.audioUrl(), "description" to item.description(), "published" to item.published())
+            val metadata = values("title" to item.title(), "audio_url" to item.audioUrl(), "description" to item.description(), "published" to item.published(), "is_video" to if (item.video()) 1 else 0)
             if (episodeId == null) {
                 metadata.put("id", UUID.randomUUID().toString()); metadata.put("feed_id", id)
                 metadata.put("guid", item.guid()); metadata.put("duration", item.duration())
                 metadata.put("new_in_last_refresh", 1)
                 db.insertOrThrow("episodes", null, metadata)
             } else db.update("episodes", metadata,
-                "id=? AND (title<>? OR audio_url<>? OR description<>? OR published<>?)",
-                arrayOf(episodeId, item.title(), item.audioUrl(), item.description(), item.published().toString()))
+                "id=? AND (title<>? OR audio_url<>? OR description<>? OR published<>? OR is_video<>?)",
+                arrayOf(episodeId, item.title(), item.audioUrl(), item.description(), item.published().toString(), if (item.video()) "1" else "0"))
         }
-        id
+        return id
     }
     suspend fun feedError(id: String, error: String) = write { db -> db.update("feeds", values("error" to error), "id=?", arrayOf(id)) }
     suspend fun unsubscribe(id: String) = write { db ->
@@ -316,9 +330,12 @@ class LibraryStore(private val context: Context) : AutoCloseable {
         db.update("episodes", values("path" to null, "downloaded" to null, "expiry" to null, "download_id" to null, "manager_id" to null), "id=?", arrayOf(id))
         db.delete("queue", "episode_id=?", arrayOf(id))
     }
-    suspend fun activate(id: String): Episode = write { db ->
+    suspend fun activate(id: String, stream: Boolean = false): Episode = write { db ->
         val ep = requireNotNull(episode(db, id)) { "Episode no longer exists" }
-        require(ep.path != null && File(ep.path).isFile) { "Download this episode before playing it" }
+        if (stream) {
+            require(ep.isVideo) { "Only video episodes support streaming here" }
+            FeedParser.httpUrl(ep.audioUrl)
+        } else require(ep.path != null && File(ep.path).isFile) { "Download this episode before playing it" }
         activeEpisode.set(id)
         ep
     }
@@ -348,7 +365,7 @@ class LibraryStore(private val context: Context) : AutoCloseable {
     private fun readEpisode(c: Cursor) = Episode(c.str("id"), c.str("feed_id"), c.str("title"), c.str("audio_url"), "",
         c.long("published"), c.long("duration"), c.nullLong("downloaded"), c.nullStr("path"), c.nullLong("expiry"), c.long("stars").toInt(),
         c.long("position"), c.long("heard") == 1L, c.nullLong("download_id"), c.nullStr("error"), managerId = c.nullLong("manager_id"),
-        newInLastRefresh = c.long("new_in_last_refresh") == 1L)
+        newInLastRefresh = c.long("new_in_last_refresh") == 1L, isVideo = c.long("is_video") == 1L)
 }
 
 private fun Cursor.str(name: String): String = getString(getColumnIndexOrThrow(name))

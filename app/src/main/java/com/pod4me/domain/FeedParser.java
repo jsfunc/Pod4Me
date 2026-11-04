@@ -15,13 +15,17 @@ import org.xml.sax.InputSource;
 import org.xml.sax.SAXException;
 import org.xml.sax.ext.DefaultHandler2;
 
-/** RSS 2.0 and Atom parser. Only enclosure URLs are treated as playable audio. */
+/** RSS 2.0 and Atom parser. Only direct media enclosures are playable. */
 public final class FeedParser {
     public static final int MAX_TITLE_CHARS = 4096;
     public static final int MAX_DESCRIPTION_CHARS = 1_048_576;
     private static final String SHORTENED = "\n[Show notes shortened because they exceed the size limit.]";
     public static final int MAX_BYTES = 64 * 1024 * 1024;
-    public record Item(String guid, String title, String audioUrl, String description, long published, long duration) {}
+    public record Item(String guid, String title, String audioUrl, String description, long published, long duration, boolean video) {
+        public Item(String guid, String title, String audioUrl, String description, long published, long duration) {
+            this(guid, title, audioUrl, description, published, duration, false);
+        }
+    }
     public record Feed(String title, List<Item> items, String artworkUrl, int skippedItems) {
         public Feed(String title, List<Item> items) { this(title, items, "", 0); }
         public Feed(String title, List<Item> items, String artworkUrl) { this(title, items, artworkUrl, 0); }
@@ -83,6 +87,7 @@ public final class FeedParser {
         private int depth, channelDepth, entryDepth, imageDepth, captureDepth, skippedItems;
         private String rssNamespace = "";
         private String mediaAudio = "";
+        private boolean video, mediaVideo;
         private boolean truncated;
         private int captureLimit;
         private String audio = "", hrefImage = "", rssImage = "", field;
@@ -112,16 +117,20 @@ public final class FeedParser {
             if (!inChannel) return;
             if (entry != null && MEDIA.equals(uri) && name.equals("content") && mediaAudio.isEmpty()) {
                 String type = attributes.getValue("type");
-                if (type != null && type.toLowerCase(Locale.ROOT).startsWith("audio/"))
+                if (type != null && (type.toLowerCase(Locale.ROOT).startsWith("audio/") || type.toLowerCase(Locale.ROOT).startsWith("video/"))) {
                     mediaAudio = resolve(source, attributes.getValue("url"));
+                    mediaVideo = type.toLowerCase(Locale.ROOT).startsWith("video/");
+                }
             }
             if (depth == channelDepth + 1 && name.equals(atom ? "entry" : "item") && canonical(uri)) {
-                entry = new HashMap<>(); entryDepth = depth; audio = ""; mediaAudio = "";
+                entry = new HashMap<>(); entryDepth = depth; audio = ""; mediaAudio = ""; video = mediaVideo = false;
             } else if (entry != null && depth == entryDepth + 1) {
                 if (audio.isEmpty() && canonical(uri) && ((!atom && name.equals("enclosure")) || (atom && name.equals("link") && "enclosure".equals(attributes.getValue("rel"))))) {
                     String type = Optional.ofNullable(attributes.getValue("type")).orElse("").split(";", 2)[0].trim().toLowerCase(Locale.ROOT);
-                    if (type.isEmpty() || type.startsWith("audio/") || type.equals("application/octet-stream") || type.equals("application/ogg"))
+                    if (type.isEmpty() || type.startsWith("audio/") || type.startsWith("video/") || type.equals("application/octet-stream") || type.equals("application/ogg")) {
                         audio = resolve(source, attributes.getValue(atom ? "href" : "url"));
+                        video = type.startsWith("video/") || ((type.isEmpty() || type.equals("application/octet-stream")) && audio.toLowerCase(Locale.ROOT).matches(".*\\.(mp4|m4v|webm|mov)(\\?.*)?$"));
+                    }
                 }
                 if (canonical(uri) && ITEM_FIELDS.contains(name) && !name.equals("encoded") && !name.equals("duration")) beginCapture(name);
                 else if (CONTENT.equals(uri) && name.equals("encoded")) beginCapture("encoded");
@@ -173,7 +182,7 @@ public final class FeedParser {
             depth--;
         }
         private void finishEntry() {
-            if (audio.isEmpty()) audio = mediaAudio;
+            if (audio.isEmpty()) { audio = mediaAudio; video = mediaVideo; }
             if (audio.isEmpty()) { skippedItems++; return; }
             String guid = entry.getOrDefault(atom ? "id" : "guid", "");
             if (guid.isEmpty()) guid = audio;
@@ -181,7 +190,7 @@ public final class FeedParser {
             String title = first(entry.get("title"), entry.get("itunes:title"), "Untitled episode");
             String description = first(entry.get("encoded"), entry.get("content"), entry.get("description"), entry.get("summary"), entry.get("itunes:summary"));
             String published = first(entry.get("pubDate"), entry.get("published"), entry.get("updated"));
-            items.add(new Item(guid, title, audio, description, date(published), duration(entry.getOrDefault("itunes:duration", ""))));
+            items.add(new Item(guid, title, audio, description, date(published), duration(entry.getOrDefault("itunes:duration", "")), video));
         }
         Feed result() {
             if (!sawChannel) throw new IllegalArgumentException("This URL is not an RSS or Atom feed");

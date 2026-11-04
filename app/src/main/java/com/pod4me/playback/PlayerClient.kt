@@ -15,12 +15,13 @@ import kotlinx.coroutines.flow.asStateFlow
 
 data class PlaybackUi(val connected: Boolean = false, val id: String? = null, val playing: Boolean = false,
     val position: Long = 0, val duration: Long = 0, val speed: Float = 1f, val hasNext: Boolean = false, val hasPrevious: Boolean = false,
-    val buffering: Boolean = false)
+    val buffering: Boolean = false, val radioName: String? = null, val videoAspectRatio: Float = 16f / 9f)
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class PlayerClient(private val app: PodApplication) {
     private var future: ListenableFuture<MediaController>? = null
     private var controller: MediaController? = null
+    val videoPlayer: Player? get() = controller
     private val mutableState = MutableStateFlow(PlaybackUi())
     val state = mutableState.asStateFlow()
     private val listener = object : Player.Listener {
@@ -45,18 +46,23 @@ class PlayerClient(private val app: PodApplication) {
     }
     fun refresh() {
         val p = controller ?: return
+        val live = com.pod4me.domain.RadioStation.isRadio(p.currentMediaItem?.mediaId)
         mutableState.value = PlaybackUi(true, p.currentMediaItem?.mediaId,
-            p.playWhenReady && p.playbackState != Player.STATE_ENDED && p.playerError == null, p.currentPosition,
-            p.duration.coerceAtLeast(0), p.playbackParameters.speed, p.hasNextMediaItem(), p.hasPreviousMediaItem(),
-            p.playbackState == Player.STATE_BUFFERING)
+            p.playWhenReady && p.playbackState != Player.STATE_ENDED && p.playerError == null, if (live) 0 else p.currentPosition,
+            if (live) 0 else p.duration.coerceAtLeast(0), p.playbackParameters.speed, p.hasNextMediaItem(), p.hasPreviousMediaItem(),
+            p.playbackState == Player.STATE_BUFFERING,
+            p.currentMediaItem?.mediaMetadata?.title?.toString().takeIf { live },
+            p.videoSize.let { if (it.width > 0 && it.height > 0) it.width * it.pixelWidthHeightRatio / it.height else 16f / 9f })
     }
     fun play(id: String, order: List<String>, position: Long = -1) {
         val args = Bundle().apply { putString("id", id); putStringArrayList("order", ArrayList(order)); putLong("position", position) }
         command(PlaybackService.START, args)
     }
+    fun streamVideo(id: String) { command(PlaybackService.STREAM_VIDEO, Bundle().apply { putString("id", id) }) }
     fun markUnheard(id: String) {
         command(PlaybackService.MARK_UNHEARD, Bundle().apply { putString("id", id) })
     }
+    fun playRadio(id: String) { command(PlaybackService.START_RADIO, Bundle().apply { putString("id", id) }) }
     fun stop() { command(PlaybackService.STOP) }
     fun toggle() { command(PlaybackService.TOGGLE) }
     fun playQueue() { command(PlaybackService.PLAY_QUEUE) }

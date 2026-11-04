@@ -17,19 +17,19 @@ internal object LibraryBackup {
     private val tables = linkedMapOf(
         "feeds" to "id,url,name,expiry_days,artwork_url,subscribed",
         "lists" to "id,name,system",
-        "episodes" to "id,feed_id,guid,title,audio_url,description,published,duration,stars,position,heard",
+        "episodes" to "id,feed_id,guid,title,audio_url,description,published,duration,stars,position,heard,is_video",
         "feed_defaults" to "feed_id,list_id",
         "memberships" to "episode_id,list_id",
         "bookmarks" to "episode_id,position,name",
         "queue" to "episode_id,ordinal",
     )
-    private val numeric = setOf("expiry_days", "subscribed", "system", "published", "duration", "stars", "position", "heard", "ordinal")
+    private val numeric = setOf("expiry_days", "subscribed", "system", "published", "duration", "stars", "position", "heard", "ordinal", "is_video")
     private val nullable = setOf("expiry_days", "artwork_url")
     const val MAX_BYTES = 256L * 1024 * 1024
 
     fun export(db: SQLiteDatabase, context: Context, output: OutputStream) {
         JsonWriter(output.writer(Charsets.UTF_8)).use { json ->
-            json.beginObject().name("format").value("Pod4Me").name("version").value(1)
+            json.beginObject().name("format").value("Pod4Me").name("version").value(2)
             for ((table, columns) in tables) {
                 json.name(table).beginArray()
                 db.rawQuery("SELECT $columns FROM $table" + if (table == "queue") " ORDER BY ordinal" else "", null).use { cursor ->
@@ -65,7 +65,9 @@ internal object LibraryBackup {
         JsonReader(input.reader(Charsets.UTF_8)).use { json ->
             json.beginObject()
             require(json.nextName() == "format" && json.nextString() == "Pod4Me") { "This is not a Pod4Me library backup" }
-            require(json.nextName() == "version" && json.nextInt() == 1) { "This backup version is not supported" }
+            require(json.nextName() == "version") { "Backup version is missing" }
+            val version = json.nextInt()
+            require(version in 1..2) { "This backup version is not supported" }
             for ((table, columns) in tables) {
                 require(json.nextName() == table) { "Backup is incomplete or has an invalid table order" }
                 json.beginArray()
@@ -87,6 +89,7 @@ internal object LibraryBackup {
                         }
                     }
                     json.endObject()
+                    if (version == 1 && table == "episodes" && !row.containsKey("is_video")) row.put("is_video", 0)
                     require(row.keySet() == expected) { "Backup record is missing fields" }
                     fun text(key: String) = row.getAsString(key)
                     fun number(key: String) = row.getAsLong(key)
@@ -125,7 +128,7 @@ internal object LibraryBackup {
                             val original = text("id"); require(original !in episodes) { "Duplicate episode ID in backup" }
                             reference("feed_id", feeds); FeedParser.httpUrl(text("audio_url"))
                             require(number("stars") in 0L..5L && number("position") >= 0 && number("duration") >= 0) { "Invalid episode progress or rating" }
-                            flag("heard")
+                            flag("heard"); flag("is_video")
                             val id = find(db, table, "feed_id=? AND guid=?", text("feed_id"), text("guid")) ?: UUID.randomUUID().toString()
                             require(id !in episodes.values) { "Duplicate episode GUID in backup" }
                             episodes[original] = id; row.put("id", id)

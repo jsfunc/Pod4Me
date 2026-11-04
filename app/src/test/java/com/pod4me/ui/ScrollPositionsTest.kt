@@ -1,6 +1,7 @@
 package com.pod4me.ui
 
 import android.app.Application
+import com.pod4me.domain.Episode
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -10,6 +11,34 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = Application::class)
 class ScrollPositionsTest {
+    private fun episode(id: String, date: Long) = Episode(id, "feed", id, "https://example.com/$id", "", date)
+
+    @Test fun latestStartsAtMostRecentPublishedEpisodeWithoutDroppingFutureEntries() {
+        val episodes = listOf(episode("future", 3000), episode("later", 2000), episode("now", 1000), episode("past", 900))
+        assertEquals(2, latestInitialIndex(episodes, 1000))
+        assertEquals(3, latestInitialIndex(episodes, 999))
+        assertEquals(4, episodes.size)
+        assertEquals(0, latestInitialIndex(episodes, 500)) // All future: keep the list usable.
+        assertEquals(0, latestInitialIndex(episodes.drop(3), 1000))
+        assertEquals(0, latestInitialIndex(emptyList(), 1000))
+    }
+
+    @Test fun latestDefaultOnlyAppliesToNewViewsAndRestoredPositionsWin() {
+        val ids = listOf("future", "now", "past", "older")
+        val original = ScrollPositions()
+        val state = original.list("latest:all", ids, initialIndex = 1, centerInitially = true)
+        assertEquals(1, state.firstVisibleItemIndex)
+        state.requestScrollToItem(3, 21)
+        assertSame(state, original.list("latest:all", ids, initialIndex = 2, centerInitially = true))
+        assertEquals(3, state.firstVisibleItemIndex)
+        val restored = ScrollPositions.restore(original.save())
+        val again = restored.list("latest:all", listOf("new") + ids, initialIndex = 2, centerInitially = true)
+        assertEquals(4, again.firstVisibleItemIndex)
+        assertEquals(21, again.firstVisibleItemScrollOffset)
+        assertEquals(0, original.list("search:feed:query", ids).firstVisibleItemIndex)
+        assertEquals(2, original.list("latest:feed", ids, initialIndex = 2).firstVisibleItemIndex)
+    }
+
     @Test fun switchingViewsKeepsIndependentLivePositions() {
         val positions = ScrollPositions()
         val ids = listOf("a", "b", "c", "d")

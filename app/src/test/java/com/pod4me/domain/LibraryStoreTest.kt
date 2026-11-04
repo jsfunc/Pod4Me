@@ -20,6 +20,42 @@ import java.io.File
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = Application::class)
 class LibraryStoreTest {
+    @Test fun videoSamplesAreAvailableOnceAndUnsubscribeStaysRemoved() = runBlocking {
+        store.seedVideoSamples()
+        val samples = store.library.value.subscriptions.filter { it.id != episode.feedId }
+        assertEquals(3, samples.size)
+        assertEquals(9, store.library.value.episodes.count { it.isVideo })
+        assertTrue(store.library.value.episodes.filter { it.isVideo }.none { it.isDownloaded || it.downloadId != null })
+        store.unsubscribe(samples.first().id)
+        store.seedVideoSamples()
+        assertEquals(3, store.library.value.subscriptions.size) // Original audio plus two videos.
+        assertEquals(10, store.library.value.episodes.size)
+    }
+
+    @Test fun videoMetadataBackupAndStreamingDoNotRequireDownloads() = runBlocking {
+        val id = store.saveFeed("https://example.com/video-feed", FeedParser.Feed("Video", listOf(
+            FeedParser.Item("v", "Video", "https://example.com/video.mp4", "Notes", 200, 20000, true))))
+        val video = store.library.value.episodes.single { it.feedId == id }
+        assertTrue(store.activate(video.id, stream = true).isVideo)
+        assertFalse(store.library.value.episode(video.id)!!.isDownloaded)
+        store.progress(video.id, 1234, 20000)
+        store.activeEpisode.set(null)
+        val output = java.io.ByteArrayOutputStream(); store.exportLibrary(output)
+        val json = org.json.JSONObject(output.toString("UTF-8"))
+        assertEquals(2, json.getInt("version"))
+        store.restoreLibrary(output.toByteArray().inputStream())
+        assertTrue(store.library.value.episode(video.id)!!.isVideo)
+        assertEquals(1234, store.library.value.episode(video.id)!!.position)
+        try { store.activate(video.id); fail("Download required for local play") } catch (_: IllegalArgumentException) { }
+        try { store.activate(episode.id, stream = true); fail("Audio must not become a video stream") } catch (_: IllegalArgumentException) { }
+        // Legacy version-1 backups contain no media-type column and still restore.
+        json.put("version", 1)
+        val rows = json.getJSONArray("episodes")
+        for (i in 0 until rows.length()) rows.getJSONObject(i).remove("is_video")
+        store.restoreLibrary(json.toString().byteInputStream())
+        assertFalse(store.library.value.episode(episode.id)!!.isVideo)
+    }
+
     private lateinit var store: LibraryStore
     private lateinit var helper: LibraryDatabase
     private lateinit var file: File

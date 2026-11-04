@@ -13,11 +13,12 @@ class PodApplication : Application() {
     val store by lazy { LibraryStore(this) }
     val feeds = FeedClient()
     val discoveryPreferences by lazy { DiscoveryPreferences(this) }
+    val radios by lazy { com.pod4me.data.RadioPreferences(this) }
     private val mutableError = MutableStateFlow<String?>(null)
     val error = mutableError.asStateFlow()
     override fun onCreate() {
         super.onCreate()
-        scope.launch { try { store.initialize() } catch (e: Exception) { report(e) } }
+        scope.launch { try { store.initialize(); radios.read() } catch (e: Exception) { report(e) } }
     }
     fun report(error: Exception) {
         if (error is CancellationException) throw error

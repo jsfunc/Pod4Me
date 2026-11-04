@@ -27,6 +27,7 @@ class AppModel(application: Application) : AndroidViewModel(application) {
     val app = application as PodApplication
     val store = app.store
     val library = store.library
+    val radios = app.radios.state
     val player = PlayerClient(app)
     val error = app.error
     private val mutableBusy = MutableStateFlow(false)
@@ -54,7 +55,7 @@ class AppModel(application: Application) : AndroidViewModel(application) {
         catch (e: Exception) { app.report(e) }
     } }
     suspend fun onLaunch() {
-        try { store.initialize(); store.reconcileDownloads(); store.expireAtLaunch(); updateStorage() }
+        try { store.initialize(); store.seedVideoSamples(); app.radios.read(); store.reconcileDownloads(); store.expireAtLaunch(); updateStorage() }
         catch (e: Exception) { app.report(e) }
     }
     private suspend fun updateStorage() = withContext(Dispatchers.IO) {

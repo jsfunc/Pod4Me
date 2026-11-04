@@ -152,7 +152,11 @@ public final class CoreChecks {
         String media = "<rss xmlns:m='http://search.yahoo.com/mrss/'><channel><item><guid>media</guid><m:group><m:content url='/fallback.mp3' type='audio/mpeg'/></m:group>%s</item></channel></rss>";
         equal("https://example.com/fallback.mp3", parse(media.formatted("")).items().get(0).audioUrl(), "Media RSS audio fallback");
         equal("https://example.com/preferred", parse(media.formatted("<enclosure url='/preferred' type='application/octet-stream'/> ")).items().get(0).audioUrl(), "enclosure wins over Media RSS");
-        equal(0, parse(media.formatted("").replace("audio/mpeg", "video/mp4")).items().size(), "Media RSS video rejected");
+        equal(true, parse(media.formatted("").replace("audio/mpeg", "video/mp4")).items().get(0).video(), "Media RSS video accepted");
+        equal(true, parse("<rss><channel><item><enclosure type='video/mp4' url='/video'/></item></channel></rss>").items().get(0).video(), "video MIME without extension");
+        equal(true, parse("<rss><channel><item><enclosure url='/clip.mp4?token=abc'/></item></channel></rss>").items().get(0).video(), "untyped video URL");
+        equal(true, parse("<feed xmlns='http://www.w3.org/2005/Atom'><entry><id>v</id><link rel='enclosure' type='video/webm' href='/clip.webm'/></entry></feed>").items().get(0).video(), "Atom video enclosure");
+        equal(false, parse(media.formatted("<enclosure url='/audio' type='audio/mpeg'/>").replace("type='audio/mpeg'/></m:group>", "type='video/mp4'/></m:group>")).items().get(0).video(), "audio enclosure overrides media video fallback");
         for (var pair : Map.of("02 Oct 02", "2002-10-02", "02 Oct 99", "1999-10-02", "02 Oct 70", "1970-10-02", "02 Oct 69", "2069-10-02", "2 févr. 2026", "2026-02-02").entrySet()) {
             equal(Instant.parse(pair.getValue() + "T08:00:00Z").toEpochMilli(), parse(rss.replace("Wed, 02 Oct 2002 08:00:00 +0000", pair.getKey() + " 08:00:00 +0000")).items().get(0).published(), "short/localised date " + pair.getKey());
         }

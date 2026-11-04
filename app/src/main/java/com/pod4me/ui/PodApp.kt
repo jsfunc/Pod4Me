@@ -98,7 +98,7 @@ fun PodApp(model: AppModel) {
                         }
                     }, actions = {
                         if (page == "Library") SortSelector(sort) { sort = it }
-                        else TextButton(onClick = { model.refresh() }, enabled = !busy && library.subscriptions.isNotEmpty()) { Text("Refresh") }
+                        else if (page != "Live") TextButton(onClick = { model.refresh() }, enabled = !busy && library.subscriptions.isNotEmpty()) { Text("Refresh") }
                     })
                     if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
@@ -107,7 +107,7 @@ fun PodApp(model: AppModel) {
                 Column {
                     if (page != "Player") MiniPlayer(library, model) { page = "Player" }
                     NavigationBar {
-                        listOf("Library" to R.drawable.ic_browse, "Latest" to R.drawable.ic_download, "Feeds" to R.drawable.ic_feeds, "Queue" to R.drawable.ic_queue_add, "Player" to R.drawable.ic_play).forEach { (name, icon) ->
+                        listOf("Library" to R.drawable.ic_browse, "Latest" to R.drawable.ic_download, "Feeds" to R.drawable.ic_feeds, "Live" to R.drawable.ic_live, "Queue" to R.drawable.ic_queue_add, "Player" to R.drawable.ic_play).forEach { (name, icon) ->
                             NavigationBarItem(selected = page == name, onClick = { page = name },
                                 modifier = Modifier.height(64.dp), alwaysShowLabel = false,
                                 icon = { Icon(painterResource(icon), contentDescription = name, modifier = Modifier.size(24.dp)) })
@@ -195,20 +195,34 @@ fun PodApp(model: AppModel) {
                             search.error != null -> search.error
                             else -> "No matching episodes. Try fewer words or another spelling."
                         } else if (library.feeds.isEmpty()) "Add your first RSS feed in Feeds, or share a podcast link into Pod4Me." else if (downloaded) "No downloads in this view. Open Latest to download episodes." else "No episodes here. Press Refresh to check the feed.")
-                        else LazyColumn(Modifier.fillMaxSize(), state = positions.list(
-                            if (downloaded) "library:$filter:${sort.name}"
-                            else if (searching) "search:$browseFeed:$searchQuery" else "latest:${browseFeed ?: "all"}", visibleIds), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(if (downloaded) 8.dp else 4.dp)) {
-                            items(episodes, key = Episode::id) { ep -> EpisodeCard(ep, library.feedName(ep.feedId), currentId == ep.id,
-                                onDetails = { selectedId = ep.id },
-                                onPlay = { model.action { model.player.play(ep.id, playOrder) } },
-                                onDownload = { model.action { model.store.download(ep.id) } },
-                                onCancel = { model.action { model.store.cancelDownload(ep.id) } },
-                                onDelete = { model.action { model.store.deleteAudio(ep.id) } },
-                                onQueue = { model.action { model.store.enqueue(ep.id) } }, compact = !downloaded,
-                                artworkUrl = library.feedArtwork(ep.feedId)) }
+                        else {
+                            val listKey = if (downloaded) "library:$filter:${sort.name}"
+                                else if (searching) "search:$browseFeed:$searchQuery" else "latest:${browseFeed ?: "all"}"
+                            val initialIndex = remember(listKey, visibleIds) {
+                                if (!downloaded && !searching) latestInitialIndex(episodes, System.currentTimeMillis()) else 0
+                            }
+                            val listState = positions.list(listKey, visibleIds, initialIndex, centerInitially = !downloaded && !searching)
+                            LaunchedEffect(listState) { positions.centerInitial(listKey) }
+                            LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(if (downloaded) 8.dp else 4.dp)) {
+                                items(episodes, key = Episode::id) { ep -> EpisodeCard(ep, library.feedName(ep.feedId), currentId == ep.id,
+                                    onDetails = { selectedId = ep.id },
+                                    onPlay = {
+                                        model.action {
+                                            if (ep.isVideo && !ep.isDownloaded) model.player.streamVideo(ep.id)
+                                            else model.player.play(ep.id, playOrder)
+                                        }
+                                        if (ep.isVideo) page = "Player"
+                                    },
+                                    onDownload = { model.action { model.store.download(ep.id) } },
+                                    onCancel = { model.action { model.store.cancelDownload(ep.id) } },
+                                    onDelete = { model.action { model.store.deleteAudio(ep.id) } },
+                                    onQueue = { model.action { model.store.enqueue(ep.id) } }, compact = !downloaded,
+                                    artworkUrl = library.feedArtwork(ep.feedId)) }
+                            }
                         }
                     }
                     "Queue" -> QueueScreen(library, model, positions, onDetails = { selectedId = it })
+                    "Live" -> RadioScreen(model, positions)
                     "Player" -> PlayerScreen(library, model, positions, onDetails = { selectedId = it })
                 }
             }
@@ -441,6 +455,7 @@ private fun EpisodeCard(ep: Episode, feed: String, current: Boolean, onDetails: 
                         ep.downloadId != null -> ActionIcon(R.drawable.ic_close, "Cancel download", onClick = onCancel)
                         else -> ActionIcon(R.drawable.ic_download, "Download episode", onClick = onDownload)
                     }
+                    if (ep.isVideo && !ep.isDownloaded) ActionIcon(R.drawable.ic_play, "Stream video", onClick = onPlay)
                 }
             }
             ep.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
@@ -483,9 +498,12 @@ private fun CompactEpisodeCard(ep: Episode, feed: String, current: Boolean, artw
                                 Icon(painterResource(R.drawable.ic_download), contentDescription = "Download episode")
                             }
                         }
+                        if (ep.isVideo && !ep.isDownloaded) IconButton(onClick = onPlay) {
+                            Icon(painterResource(R.drawable.ic_play), contentDescription = "Stream video")
+                        }
                     }
                     val minutes = durationMinutes(ep.duration)
-                    Text(durationLabel(ep.duration),
+                    Text((if (ep.isVideo) "Video · " else "") + durationLabel(ep.duration),
                         style = MaterialTheme.typography.labelSmall, maxLines = 1,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.semantics {
@@ -543,12 +561,13 @@ private fun QueueScreen(library: Library, model: AppModel, positions: ScrollPosi
 @Composable
 private fun PlayerScreen(library: Library, model: AppModel, positions: ScrollPositions, onDetails: (String) -> Unit) {
     val playback by model.player.state.collectAsStateWithLifecycle()
+    if (playback.radioName != null) { LivePlayer(playback, model); return }
     val ep = library.episode(playback.id)
     var addBookmark by remember { mutableStateOf<Long?>(null) }
     var editBookmark by remember { mutableStateOf<Bookmark?>(null) }
     if (ep == null) {
         Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(if (library.queue.isEmpty()) "Choose a downloaded episode and tap Play." else "Your queue is ready to start.")
+            Text(if (library.queue.isEmpty()) "Choose an episode to play, or stream a video from Latest." else "Your queue is ready to start.")
             if (library.queue.isNotEmpty()) Button(onClick = { model.action { model.player.playQueue() } }) { Text("Play queue") }
         }
         return
@@ -556,6 +575,15 @@ private fun PlayerScreen(library: Library, model: AppModel, positions: ScrollPos
     var seeking by remember(ep.id) { mutableStateOf<Float?>(null) }
     var speed by remember(playback.speed) { mutableFloatStateOf(playback.speed) }
     Column(Modifier.fillMaxSize().verticalScroll(positions.scroll("player:${ep.id}")).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (ep.isVideo) {
+            VideoSurface(model.player.videoPlayer, playback.videoAspectRatio, playback.playing)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(if (ep.isDownloaded) "Video · Downloaded" else "Video · Streaming", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
+                if (!ep.isDownloaded) TextButton(onClick = { model.action {
+                    if (ep.downloadId != null) model.store.cancelDownload(ep.id) else model.store.download(ep.id)
+                } }) { Text(if (ep.downloadId != null) "Cancel download" else "Download") }
+            }
+        }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             FeedArtwork(library.feedArtwork(ep.feedId), 64.dp)
             Column(Modifier.weight(1f)) {
@@ -567,7 +595,6 @@ private fun PlayerScreen(library: Library, model: AppModel, positions: ScrollPos
             onValueChange = { seeking = it }, valueRange = 0f..playback.duration.toFloat().coerceAtLeast(1f), enabled = playback.duration > 0,
             onValueChangeFinished = { seeking?.let { value -> model.action { model.player.seek(value.toLong()) } }; seeking = null })
         Text("${time(seeking?.toLong() ?: playback.position)} / ${time(playback.duration)}")
-        if (playback.buffering) Text("Preparing audio…", style = MaterialTheme.typography.bodySmall)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = { model.action { model.player.previous() } }, enabled = playback.hasPrevious) {
                 Icon(painterResource(R.drawable.ic_previous), contentDescription = "Previous episode")
@@ -881,6 +908,22 @@ private fun share(context: Context, text: String) {
 @Composable
 private fun MiniPlayer(library: Library, model: AppModel, onOpen: () -> Unit) {
     val playback by model.player.state.collectAsStateWithLifecycle()
+    if (playback.radioName != null) {
+        Surface(tonalElevation = 4.dp) {
+            Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(painterResource(R.drawable.ic_live), contentDescription = null)
+                Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                    Text(playback.radioName.orEmpty(), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(if (playback.buffering) "Connecting…" else if (playback.playing) "Live" else "Paused", style = MaterialTheme.typography.labelSmall)
+                }
+                ActionIcon(if (playback.playing) R.drawable.ic_stop else R.drawable.ic_play,
+                    if (playback.playing) "Stop radio" else "Play live", onClick = { model.action {
+                        if (playback.playing) model.player.stop() else model.player.toggle()
+                    } })
+            }
+        }
+        return
+    }
     val ep = library.episode(playback.id) ?: return
     Surface(tonalElevation = 4.dp) {
         Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
