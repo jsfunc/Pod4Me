@@ -20,6 +20,41 @@ class LibraryMigrationTest {
     @Test fun upgradesVersionFourWithoutMarkingExistingEpisodesNew() { checkUpgrade(4) }
     @Test fun upgradesVersionFivePreservingAudioAndHistory() { checkUpgrade(5) }
 
+    @Test fun upgradesVersionSixPreservingAudioAndHistory() { checkUpgrade(6) }
+
+    @Test fun upgradesVersionSevenPreservingLibrary() { checkUpgrade(7) }
+
+    @Test fun versionEightCapsOnlyDownloadedHeardDeadlinesWithoutExtendingEarlierOnes() {
+        val context = RuntimeEnvironment.getApplication()
+        context.deleteDatabase("pod4me.db")
+        val file = context.getDatabasePath("pod4me.db")
+        file.parentFile!!.mkdirs()
+        val now = System.currentTimeMillis()
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            db.execSQL("CREATE TABLE feeds(id TEXT)")
+            db.execSQL("CREATE TABLE episodes(id TEXT, heard INTEGER, path TEXT, expiry INTEGER)")
+            for ((id, heard, path, expiry) in listOf(
+                listOf("long", 1, "/file", now + 7 * Policy.DAY), listOf("short", 1, "/file", now + Policy.DAY),
+                listOf("forever", 1, "/file", null), listOf("unheard", 0, "/file", now + 30 * Policy.DAY),
+                listOf("missing", 1, null, now + 7 * Policy.DAY))) {
+                db.execSQL("INSERT INTO episodes VALUES(?,?,?,?)", arrayOf<Any?>(id, heard, path, expiry))
+            }
+            context.assets.open("migration_7_8.sql").bufferedReader().useLines { lines -> lines.filter(String::isNotBlank).forEach(db::execSQL) }
+            db.rawQuery("SELECT id,expiry FROM episodes", null).use { rows ->
+                while (rows.moveToNext()) {
+                    val expiry = rows.getLong(1)
+                    when (rows.getString(0)) {
+                        "long", "forever" -> assertTrue(expiry in (now + 3 * Policy.DAY - 1000)..(System.currentTimeMillis() + 3 * Policy.DAY))
+                        "short" -> assertEquals(now + Policy.DAY, expiry)
+                        "unheard" -> assertEquals(now + 30 * Policy.DAY, expiry)
+                        "missing" -> assertEquals(now + 7 * Policy.DAY, expiry)
+                    }
+                }
+            }
+            db.rawQuery("SELECT etag,last_modified,last_refreshed FROM feeds", null).close()
+        }
+    }
+
     private fun checkUpgrade(oldVersion: Int) {
         val context = RuntimeEnvironment.getApplication()
         context.deleteDatabase("pod4me.db")
@@ -30,7 +65,8 @@ class LibraryMigrationTest {
             db.execSQL("CREATE TABLE feeds(id TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, name TEXT NOT NULL, expiry_days INTEGER, error TEXT$artwork)")
             val rest = context.assets.open("schema.sql").bufferedReader().use { it.readText() }.substringAfter(';')
                 .let { if (oldVersion < 5) it.replace(", new_in_last_refresh INTEGER NOT NULL DEFAULT 0 CHECK(new_in_last_refresh IN (0,1))", "") else it }
-                .replace(", is_video INTEGER NOT NULL DEFAULT 0 CHECK(is_video IN (0,1))", "")
+                .let { if (oldVersion < 6) it.replace(", is_video INTEGER NOT NULL DEFAULT 0 CHECK(is_video IN (0,1))", "") else it }
+                .let { if (oldVersion < 7) it.replace(", byte_size INTEGER CHECK(byte_size IS NULL OR byte_size>0)", "") else it }
                 .let { if (oldVersion < 4) it.replace(", manager_id INTEGER", "") else it }
             rest.split(';').map(String::trim).filter(String::isNotEmpty).forEach(db::execSQL)
             db.execSQL("INSERT INTO feeds(id,url,name,expiry_days) VALUES('f','https://example.com/feed','My name',30)")
@@ -43,14 +79,14 @@ class LibraryMigrationTest {
         val helper = LibraryDatabase(context)
         try {
             val db = helper.writableDatabase
-            assertEquals(6, db.version)
+            assertEquals(8, db.version)
             db.rawQuery("SELECT name,subscribed,artwork_url FROM feeds", null).use {
                 assertTrue(it.moveToFirst()); assertEquals("My name", it.getString(0)); assertEquals(1, it.getInt(1))
             }
-            db.rawQuery("SELECT path,position,stars,new_in_last_refresh,is_video FROM episodes", null).use {
+            db.rawQuery("SELECT path,position,stars,new_in_last_refresh,is_video,byte_size FROM episodes", null).use {
                 assertTrue(it.moveToFirst()); assertEquals("/audio", it.getString(0)); assertEquals(42000, it.getInt(1)); assertEquals(5, it.getInt(2))
                 assertEquals(0, it.getInt(3))
-                assertEquals(0, it.getInt(4))
+                assertEquals(0, it.getInt(4)); assertTrue(it.isNull(5))
             }
             for (table in listOf("memberships", "bookmarks", "queue")) db.rawQuery("SELECT COUNT(*) FROM $table", null).use {
                 assertTrue(it.moveToFirst()); assertEquals(1, it.getInt(0))

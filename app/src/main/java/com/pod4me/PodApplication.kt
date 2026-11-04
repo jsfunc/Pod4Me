@@ -5,6 +5,8 @@ import com.pod4me.data.FeedClient
 import com.pod4me.data.DiscoveryPreferences
 import com.pod4me.data.LibraryStore
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
@@ -13,9 +15,18 @@ class PodApplication : Application() {
     val store by lazy { LibraryStore(this) }
     val feeds = FeedClient()
     val discoveryPreferences by lazy { DiscoveryPreferences(this) }
-    val radios by lazy { com.pod4me.data.RadioPreferences(this) }
+    val radios by lazy { com.pod4me.data.RadioPreferences(this) { report(IllegalStateException(it)) } }
     private val mutableError = MutableStateFlow<String?>(null)
     val error = mutableError.asStateFlow()
+    private val initialization = Mutex()
+    private var seeded = false
+    suspend fun initializeOnce() = initialization.withLock {
+        if (!seeded) {
+            if (!store.library.value.ready) store.initialize()
+            store.seedVideoSamples(); store.seedYouTubeChannel(); radios.read()
+            seeded = true
+        }
+    }
     override fun onCreate() {
         super.onCreate()
         scope.launch { try { store.initialize(); radios.read() } catch (e: Exception) { report(e) } }

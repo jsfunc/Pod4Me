@@ -22,9 +22,9 @@ public final class CoreChecks {
         equal(true, Policy.isHeard(9500, 10000), "heard at 95 percent");
         equal(false, Policy.isHeard(100, 0), "unknown duration is not heard");
         equal(false, Policy.isHeard(100, -1), "invalid duration is not heard");
-        equal(now + 7 * Policy.DAY, Policy.heardExpiry(null, now), "heard infinite episode expires in 7 days");
+        equal(now + 3 * Policy.DAY, Policy.heardExpiry(null, now), "heard infinite episode expires in 3 days");
         equal(now + Policy.DAY, Policy.heardExpiry(now + Policy.DAY, now), "heard never extends expiry");
-        equal(now + 7 * Policy.DAY, Policy.heardExpiry(now + 30 * Policy.DAY, now), "heard caps existing expiry");
+        equal(now + 3 * Policy.DAY, Policy.heardExpiry(now + 30 * Policy.DAY, now), "heard caps existing expiry");
         equal(now - 1, Policy.heardExpiry(now - 1, now), "already expired stays expired");
         equal(false, Policy.isExpired(now, now, true, false), "4ever survives expiry");
         equal(false, Policy.canDelete(true, false), "4ever prevents manual deletion");
@@ -175,6 +175,25 @@ public final class CoreChecks {
         rejects(() -> parse("<rss><item><title>Missing channel</title></item></rss>"), "missing RSS channel rejected");
         equal("Café", FeedParser.parse("<?xml version='1.0' encoding='UTF-16'?><rss><channel><title>Café</title></channel></rss>".getBytes(StandardCharsets.UTF_16), "https://example.com/feed").title(), "UTF-16 feed encoding is respected");
         rejects(() -> FeedParser.parse("<?xml version='1.0' encoding='UTF-16'?><!DOCTYPE rss [<!ENTITY bad 'expanded'>]><rss><channel><title>&bad;</title></channel></rss>".getBytes(StandardCharsets.UTF_16), "https://example.com/feed"), "UTF-16 DTD rejected before entity expansion");
+        for (String date : List.of("Tue, 03 Nov 2026 10:00:00 +01:00", "Tue, 03 Nov 2026 10:00:00 CET",
+                "Tue, 03 Nov 2026 09:00:00 Z", "2026-11-03 09:00:00", "2026-11-03T10:00:00+01:00")) {
+            equal(Instant.parse("2026-11-03T09:00:00Z").toEpochMilli(), parse("<rss><channel><item><pubDate>" + date + "</pubDate><enclosure url='https://example.com/e.mp3'/></item></channel></rss>").items().get(0).published(), "publisher date " + date);
+        }
+        for (var pair : Map.of("03 déc 2026", "2026-12-03", "03 févr 2026", "2026-02-03", "03 Sept 2026", "2026-09-03", "03 janv 2026", "2026-01-03", "03 avr 2026", "2026-04-03", "03 juil 2026", "2026-07-03").entrySet())
+            equal(Instant.parse(pair.getValue() + "T09:00:00Z").toEpochMilli(), parse("<rss><channel><item><pubDate>" + pair.getKey() + " 10:00:00 +0100</pubDate><enclosure url='https://example.com/e.mp3'/></item></channel></rss>").items().get(0).published(), "month " + pair.getKey());
+        for (String length : List.of("3010290787", "200000001", "200000000"))
+            equal(Long.valueOf(length), parse("<rss><channel><item><enclosure url='https://example.com/e.mp4' type='video/mp4' length='" + length + "'/></item></channel></rss>").items().get(0).byteSize(), "64-bit enclosure size");
+        for (String length : List.of("-1", "0", "unknown", "99999999999999999999999"))
+            equal(null, parse("<rss><channel><item><enclosure url='https://example.com/e.mp3' length='" + length + "'/></item></channel></rss>").items().get(0).byteSize(), "invalid size stays unknown");
+        var subscriptions = List.of(new SubscriptionFormat.Entry("https://example.com/rss?a=1&b=2", "L'été <culture> \"radio\""));
+        equal(subscriptions, SubscriptionFormat.parse(SubscriptionFormat.opml(subscriptions).getBytes(StandardCharsets.UTF_8)), "OPML escapes titles and URL queries");
+        equal(subscriptions, SubscriptionFormat.parse(SubscriptionFormat.opml(subscriptions).replace("UTF-8", "UTF-16").getBytes(StandardCharsets.UTF_16)), "OPML UTF-16 encoding");
+        equal(List.of(new SubscriptionFormat.Entry("https://example.com/feed", "My podcast")), SubscriptionFormat.parse("https://example.com/feed [My podcast]".getBytes(StandardCharsets.UTF_8)), "text import keeps titles");
+        equal(List.of(new SubscriptionFormat.Entry("https://example.com/a", "A")), SubscriptionFormat.parse("<opml><body><outline text='Group'><outline text='A' xmlUrl='https://example.com/a'/></outline></body></opml>".getBytes(StandardCharsets.UTF_8)), "nested OPML folders");
+        rejects(() -> SubscriptionFormat.parse("<!DOCTYPE opml [<!ENTITY x SYSTEM 'file:///etc/passwd'>]><opml><body/></opml>".getBytes(StandardCharsets.UTF_8)), "OPML rejects DTDs");
+        rejects(() -> SubscriptionFormat.parse("<rss><channel/></rss>".getBytes(StandardCharsets.UTF_8)), "RSS is not a subscription-list file");
+        rejects(() -> SubscriptionFormat.parse(new byte[SubscriptionFormat.MAX_BYTES + 1]), "subscription import byte cap");
+        equal("https://example.com/moved", parse("<rss xmlns:itunes='http://www.itunes.com/dtds/podcast-1.0.dtd'><channel><itunes:new-feed-url>https://example.com/moved</itunes:new-feed-url></channel></rss>").newFeedUrl(), "publisher feed move");
         System.out.println("PASS: " + checks + " core checks (expiry, protection, heard threshold, resume, queue, RSS, Atom, feed lists, artwork, invalid input)");
     }
     private static FeedParser.Feed largeFeed() throws Exception {

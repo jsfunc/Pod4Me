@@ -12,6 +12,8 @@ import androidx.media3.exoplayer.hls.playlist.HlsMultivariantPlaylist
 import androidx.media3.exoplayer.hls.playlist.HlsPlaylistParser
 import com.pod4me.domain.FeedParser
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -30,6 +32,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal class RadioBuffer(cacheDirectory: File, url: String,
     private val http: OkHttpClient = defaultHttp,
     capture: Boolean = true,
+    private val retryDelayMs: Long = 1000,
+    private val retryLimit: Int = 24,
+    private val pauseLimitMs: Long = 30 * 60_000L,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val closed = AtomicBoolean(false)
@@ -37,45 +42,115 @@ internal class RadioBuffer(cacheDirectory: File, url: String,
     private val identity = UUID.randomUUID().toString()
     internal val window = RadioWindow(File(cacheDirectory, "radio-buffer-$identity"))
     val uri: Uri = Uri.parse("pod4me-radio://$identity/live.m3u8")
+    private class InvalidStation(message: String) : IOException(message)
+    enum class Status { CAPTURING, RECONNECTING, PAUSE_LIMIT, UNAVAILABLE }
+    private val mutableStatus = MutableStateFlow(Status.CAPTURING)
+    val status = mutableStatus.asStateFlow()
+    private var pauseJob: Job? = null
+    private val captureStopped = AtomicBoolean(false)
+    private var reconnectDiscontinuity = false
+    private var lastHlsUrl: String? = null
+    private var lastHlsSequence: Long? = null
+    private var lastHlsDiscontinuity: Int? = null
     private val job = scope.launch {
-        try {
-            if (!capture) awaitCancellation()
-            // Recover private cache space left by a process kill, without touching another session.
-            activeDirectories.add(window.directory.absolutePath)
-            cacheDirectory.listFiles { file -> file.name.startsWith("radio-buffer-") && file.isDirectory }
-                ?.filterNot { it.absolutePath in activeDirectories }?.forEach { it.deleteRecursively() }
-            request(url).use { response ->
-                val body = response.body ?: throw IOException("The radio returned no audio")
-                val source = body.source()
-                val playlist = response.header("Content-Type").orEmpty().contains("mpegurl", true) ||
-                    (source.request(7) && source.peek().readUtf8(7) == "#EXTM3U")
-                if (playlist) {
-                    val bytes = body.byteStream().readNBytes(1024 * 1024 + 1)
-                    if (bytes.size > 1024 * 1024) throw IOException("Radio playlist is too large")
-                    captureHls(response.request.url.toString(), bytes)
+        activeDirectories.add(window.directory.absolutePath)
+        cacheDirectory.listFiles { file -> file.name.startsWith("radio-buffer-") && file.isDirectory }
+            ?.filterNot { it.absolutePath in activeDirectories }?.forEach { it.deleteRecursively() }
+        if (!capture) awaitCancellation()
+        var attempts = 0
+        var previousSequence = window.latestSequence
+        while (isActive && !captureStopped.get()) {
+            try {
+                captureUrl(url)
+                if (mutableStatus.value == Status.UNAVAILABLE) break
+                throw IOException("Radio connection ended")
+            } catch (e: Exception) {
+                if (e is CancellationException || closed.get() || captureStopped.get()) break
+                if (window.latestSequence != previousSequence) attempts = 0
+                previousSequence = window.latestSequence
+                window.fail(IOException("Could not receive this radio: ${e.message}", e))
+                if (++attempts > (if (window.hasAudio) retryLimit else minOf(retryLimit, 2)) || e is InvalidStation) {
+                    window.finish()
+                    mutableStatus.value = Status.UNAVAILABLE
+                    break
+                }
+                mutableStatus.value = Status.RECONNECTING
+                reconnectDiscontinuity = true
+                delay(minOf(15, 1 shl minOf(attempts - 1, 4)) * retryDelayMs)
+            }
+        }
+    }
+
+    /** Applies to UI, notification and headset pauses alike. Resume never silently jumps live. */
+    fun setPaused(paused: Boolean) {
+        if (!paused) { if (!captureStopped.get()) { pauseJob?.cancel(); pauseJob = null }; return }
+        if (pauseJob != null || captureStopped.get()) return
+        pauseJob = scope.launch {
+            delay(pauseLimitMs)
+            captureStopped.set(true)
+            job.cancel()
+            calls.forEach(Call::cancel)
+            job.join()
+            window.finish()
+            mutableStatus.value = Status.PAUSE_LIMIT
+        }
+    }
+
+    private fun appended() {
+        reconnectDiscontinuity = false
+        mutableStatus.value = Status.CAPTURING
+    }
+
+    private suspend fun captureUrl(url: String, wrapperDepth: Int = 0) {
+        request(url).use { response ->
+            val body = response.body ?: throw IOException("The radio returned no audio")
+            val source = body.source()
+            val type = response.header("Content-Type").orEmpty()
+            val prefix = if (source.request(7)) source.peek().readUtf8(7) else ""
+            if (type.contains("text/html", true) || prefix.trimStart().startsWith("<html", true) || prefix.startsWith("<!docty", true))
+                throw InvalidStation("Use the station's direct audio URL, not its web page")
+            val playlist = type.contains("mpegurl", true) || type.contains("scpls", true) ||
+                prefix == "#EXTM3U" || prefix.startsWith("[playli", true) ||
+                response.request.url.encodedPath.endsWith(".m3u", true) || response.request.url.encodedPath.endsWith(".pls", true)
+            if (playlist) {
+                val data = body.byteStream().readNBytes(1024 * 1024 + 1)
+                if (data.size > 1024 * 1024) throw IOException("Radio playlist is too large")
+                val text = data.toString(Charsets.UTF_8)
+                // Master playlists have STREAM-INF/MEDIA, not TARGETDURATION.
+                if (text.lineSequence().any { it.trim().startsWith("#EXT-X-") }) {
+                    captureHls(response.request.url.toString(), data)
                 } else {
-                    val interval = response.header("icy-metaint")?.toIntOrNull()?.takeIf { it > 0 }
-                    val input = body.byteStream()
-                    val frames = RadioFrames(if (interval != null) IcyAudioInput(input, interval) else input)
-                    var chunk = ByteArrayOutputStream()
-                    var duration = 0L
-                    var extension = ""
-                    while (isActive) {
-                        val frame = frames.next()
-                        if (extension.isNotEmpty() && extension != frame.extension) throw IOException("Radio audio format changed; reconnect to continue")
-                        extension = frame.extension
-                        chunk.write(frame.bytes)
-                        duration += frame.durationUs
-                        if (duration >= 2_000_000) {
-                            window.append(chunk.toByteArray(), duration, extension)
-                            chunk = ByteArrayOutputStream()
-                            duration = 0
+                    if (wrapperDepth >= 1) throw IOException("Radio playlist wrappers are nested too deeply")
+                    val entry = text.lineSequence().map(String::trim).mapNotNull { line ->
+                        when {
+                            line.matches(Regex("(?i)File[0-9]+=.*")) -> line.substringAfter('=')
+                            line.startsWith("http://", true) || line.startsWith("https://", true) -> line
+                            else -> null
                         }
+                    }.firstOrNull() ?: throw IOException("No stream URL in this radio playlist")
+                    captureUrl(FeedParser.httpUrl(entry), wrapperDepth + 1)
+                }
+            } else {
+                val interval = response.header("icy-metaint")?.toIntOrNull()?.takeIf { it > 0 }
+                val input = body.byteStream()
+                val frames = RadioFrames(if (interval != null) IcyAudioInput(input, interval) else input)
+                var chunk = ByteArrayOutputStream()
+                var duration = 0L
+                var extension = ""
+                while (currentCoroutineContext().isActive) {
+                    val frame = frames.next()
+                    if (extension.isNotEmpty() && extension != frame.extension) throw IOException("Radio audio format changed")
+                    extension = frame.extension
+                    chunk.write(frame.bytes)
+                    duration += frame.durationUs
+                    if (duration >= 2_000_000) {
+                        window.append(chunk.toByteArray(), duration, extension, discontinuous = reconnectDiscontinuity)
+                        appended()
+                        chunk = ByteArrayOutputStream()
+                        duration = 0
                     }
                 }
             }
-        } catch (e: Exception) {
-            if (!closed.get() && e !is CancellationException) window.fail(IOException("Could not buffer this radio: ${e.message}", e))
         }
     }
 
@@ -85,11 +160,12 @@ internal class RadioBuffer(cacheDirectory: File, url: String,
         if (length >= 0) builder.header("Range", "bytes=$offset-${offset + length - 1}")
         val call = http.newCall(builder.build())
         calls.add(call)
-        if (closed.get()) call.cancel()
+        if (closed.get() || captureStopped.get()) call.cancel()
         try {
             val response = call.execute()
             if (!response.isSuccessful || (length >= 0 && response.code != 206)) {
                 response.close()
+                if (response.code in 400..499 && response.code !in setOf(408, 429)) throw InvalidStation("Radio server returned HTTP ${response.code}")
                 throw IOException("Radio server returned HTTP ${response.code}")
             }
             return response
@@ -112,15 +188,20 @@ internal class RadioBuffer(cacheDirectory: File, url: String,
         var url = initialUrl
         var data = initialBytes
         var masterDepth = 0
-        var lastSequence: Long? = null
-        var lastDiscontinuity: Int? = null
-        var restarted = false
+        var lastSequence: Long? = lastHlsSequence
+        var lastDiscontinuity: Int? = lastHlsDiscontinuity
+        var restarted = reconnectDiscontinuity
+        var pollFailures = 0
+        var cachedInit: Pair<Triple<String, Long, Long>, ByteArray>? = null
         while (currentCoroutineContext().isActive) {
             val playlist = HlsPlaylistParser().parse(Uri.parse(url), ByteArrayInputStream(data))
             if (playlist is HlsMultivariantPlaylist) {
                 if (++masterDepth > 4) throw IOException("Radio playlists are nested too deeply")
                 val next = playlist.audios.firstOrNull { it.url != null }?.url
-                    ?: playlist.variants.filter { it.format.height <= 0 }.minByOrNull { it.format.bitrate }?.url
+                    ?: playlist.variants.filter { it.format.height <= 0 }.let { variants ->
+                        variants.filter { it.format.bitrate in 1..192000 }.maxByOrNull { it.format.bitrate }
+                            ?: variants.minByOrNull { it.format.bitrate.coerceAtLeast(0) }
+                    }?.url
                     ?: throw IOException("This is not an audio-only radio playlist")
                 val fetched = bytes(next.toString())
                 url = fetched.first; data = fetched.second
@@ -128,6 +209,7 @@ internal class RadioBuffer(cacheDirectory: File, url: String,
             }
             val media = playlist as? HlsMediaPlaylist ?: throw IOException("Unsupported radio playlist")
             if (media.hasEndTag) throw IOException("Use a live radio playlist, not an episode playlist")
+            if (url != lastHlsUrl) { lastSequence = null; lastDiscontinuity = null; lastHlsUrl = url }
             val end = media.mediaSequence + media.segments.size - 1
             if (lastSequence != null && end < lastSequence) { lastSequence = null; lastDiscontinuity = null; restarted = true }
             val first = if (lastSequence == null) (media.segments.size - 3).coerceAtLeast(0) else 0
@@ -139,10 +221,15 @@ internal class RadioBuffer(cacheDirectory: File, url: String,
                 if (segment.drmInitData != null) throw IOException("Protected radio streams cannot be buffered")
                 val address = UriUtil.resolve(url, segment.url)
                 val audio = bytes(address, segment.byteRangeOffset, segment.byteRangeLength).second
-                val init = segment.initializationSegment?.let { bytes(UriUtil.resolve(url, it.url), it.byteRangeOffset, it.byteRangeLength).second }
+                val discontinuity = media.discontinuitySequence + segment.relativeDiscontinuitySequence
+                if (restarted || lastDiscontinuity != discontinuity) cachedInit = null
+                val init = segment.initializationSegment?.let {
+                    val resource = Triple(UriUtil.resolve(url, it.url), it.byteRangeOffset, it.byteRangeLength)
+                    if (cachedInit?.first != resource) cachedInit = resource to bytes(resource.first, resource.second, resource.third).second
+                    cachedInit!!.second
+                }
                 val key = segment.fullSegmentEncryptionKeyUri?.let { bytes(UriUtil.resolve(url, it)).second }
                 if (key != null && key.size != 16) throw IOException("Invalid radio encryption key")
-                val discontinuity = media.discontinuitySequence + segment.relativeDiscontinuitySequence
                 val gap = lastSequence != null && sequence != lastSequence + 1
                 val extension = when {
                     init != null -> "m4s"
@@ -153,13 +240,30 @@ internal class RadioBuffer(cacheDirectory: File, url: String,
                 window.append(audio, segment.durationUs, extension,
                     discontinuous = restarted || gap || (lastDiscontinuity != null && lastDiscontinuity != discontinuity),
                     init = init, key = key, iv = segment.encryptionIV)
+                appended()
+                pollFailures = 0
                 lastSequence = sequence
                 lastDiscontinuity = discontinuity
+                lastHlsSequence = sequence
+                lastHlsDiscontinuity = discontinuity
                 restarted = false
             }
             delay((media.targetDurationUs / 2000).coerceIn(500, 5000))
-            val fetched = bytes(url)
-            url = fetched.first; data = fetched.second
+            while (true) {
+                try {
+                    val fetched = bytes(url)
+                    url = fetched.first; data = fetched.second
+                    break
+                } catch (e: IOException) {
+                    if (++pollFailures > retryLimit) {
+                        window.finish()
+                        mutableStatus.value = Status.UNAVAILABLE
+                        return
+                    }
+                    mutableStatus.value = Status.RECONNECTING
+                    delay(minOf(15, 1 shl minOf(pollFailures - 1, 4)) * retryDelayMs)
+                }
+            }
         }
     }
 
@@ -194,6 +298,7 @@ internal class RadioBuffer(cacheDirectory: File, url: String,
 
     fun close() {
         if (!closed.compareAndSet(false, true)) return
+        pauseJob?.cancel()
         window.close()
         calls.forEach(Call::cancel)
         job.cancel()

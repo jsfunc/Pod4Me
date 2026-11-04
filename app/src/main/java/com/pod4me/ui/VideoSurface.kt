@@ -13,12 +13,13 @@ import androidx.media3.common.Player
 
 /** A surface for the service's existing player; controls remain in the regular Player tab. */
 @Composable
-internal fun VideoSurface(player: Player?, aspectRatio: Float, playing: Boolean) {
+internal fun VideoSurface(player: Player?, aspectRatio: Float, playing: Boolean,
+    modifier: Modifier = Modifier.fillMaxWidth().aspectRatio(aspectRatio.coerceIn(.25f, 4f))) {
     if (player == null) return
     key(player) {
         AndroidView(
             factory = { TextureView(it) },
-            modifier = Modifier.fillMaxWidth().aspectRatio(aspectRatio.coerceIn(.25f, 4f)).background(Color.Black),
+            modifier = modifier.background(Color.Black),
             onReset = null,
             onRelease = { view -> player.clearVideoTextureView(view); view.keepScreenOn = false },
             update = { view -> player.setVideoTextureView(view); view.keepScreenOn = playing },

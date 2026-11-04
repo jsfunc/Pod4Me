@@ -44,6 +44,17 @@ class PlayerClientTest {
             old.setVideoTextureView(portrait)
             assertNotNull(output)
 
+            // Fullscreen swaps views on the same controller; late disposal must not clear the new one.
+            old.setVideoTextureView(landscape)
+            val fullscreenOutput = output
+            assertNotNull(fullscreenOutput)
+            old.clearVideoTextureView(portrait)
+            assertSame(fullscreenOutput, output)
+            assertEquals(12000L, engine.currentPosition)
+            old.setVideoTextureView(portrait)
+            old.clearVideoTextureView(landscape)
+            assertNotNull(output)
+
             // Activity ON_STOP runs before the old composition/view is disposed on rotation.
             client.disconnect()
             assertNull("Disconnect must detach the service's surface before Android destroys it", output)

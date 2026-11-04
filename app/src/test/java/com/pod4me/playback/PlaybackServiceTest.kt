@@ -21,6 +21,61 @@ import java.io.File
 @Config(sdk = [35], application = PodApplication::class)
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class PlaybackServiceTest {
+    @Test fun timerPausesPodcastKeepsPositionAndSurvivesTrackChangesAndManualPauses() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val episodes = queuedEpisodes(app)
+        val controller = service(app)
+        try {
+            val service = controller.get()
+            service.startEpisode(episodes[0].id, episodes.map { it.id }, 1000, play = false)
+            service.setSleepTimer(15 * 60_000)
+            assertFalse(service.checkSleepTimer(android.os.SystemClock.elapsedRealtime() + 1000))
+            service.startEpisode(episodes[1].id, episodes.map { it.id }, 2345, play = false)
+            assertTrue(service.checkSleepTimer(Long.MAX_VALUE))
+            assertFalse(player(service).playWhenReady)
+            assertEquals(episodes[1].id, player(service).currentMediaItem!!.mediaId)
+            assertEquals(2345L, app.store.library.value.episode(episodes[1].id)!!.position)
+            assertFalse(service.checkSleepTimer(Long.MAX_VALUE))
+            service.setSleepTimer(60_000); service.setSleepTimer(-1)
+            assertFalse(service.checkSleepTimer(Long.MAX_VALUE))
+            service.setSleepTimer(0)
+            assertTrue((player(service) as androidx.media3.exoplayer.ExoPlayer).pauseAtEndOfMediaItems)
+            service.setSleepTimer(-1)
+            assertFalse((player(service) as androidx.media3.exoplayer.ExoPlayer).pauseAtEndOfMediaItems)
+        } finally { controller.destroy() }
+    }
+
+    @Test fun radioTimerStopsCaptureAndClearsRetainedAudio() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val controller = service(app)
+        var buffer: RadioBuffer? = null
+        val create = controller.get().createRadioBuffer
+        controller.get().createRadioBuffer = { create(it).also { captured -> buffer = captured } }
+        try {
+            val service = controller.get()
+            service.startRadio(app.radios.read().first().id, play = false)
+            assertTrue(buffer!!.window.hasAudio)
+            try { service.setSleepTimer(0); fail("Radio has no episode end") } catch (_: IllegalArgumentException) { }
+            service.setSleepTimer(1000)
+            assertTrue(service.checkSleepTimer(Long.MAX_VALUE))
+            assertEquals(0, player(service).mediaItemCount)
+            assertFalse(buffer!!.window.directory.exists())
+            try { buffer!!.window.read("live.m3u8"); fail("Stopped buffer must be closed") } catch (_: java.io.IOException) { }
+        } finally { controller.destroy() }
+    }
+
+    @Test fun audioOutputFailureDoesNotBlameOrSkipDownload() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val episodes = queuedEpisodes(app)
+        val controller = service(app)
+        try {
+            controller.get().startQueue(play = false)
+            controller.get().recoverPlaybackError(androidx.media3.common.PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED)
+            assertNull(app.store.library.value.episode(episodes[0].id)!!.error)
+            assertEquals(0, player(controller.get()).mediaItemCount)
+        } finally { controller.destroy() }
+    }
+
     private fun service(app: PodApplication) = Robolectric.buildService(PlaybackService::class.java).create().also { controller ->
         controller.get().createRadioBuffer = { station ->
             RadioBuffer(app.cacheDir, station.url, capture = false).also { buffer ->
@@ -28,6 +83,69 @@ class PlaybackServiceTest {
                 repeat(12) { buffer.window.append(audio, 2_100_000, "mp3") }
             }
         }
+    }
+
+    @Test fun resumeAfterCaptureLimitKeepsPositionAndBackToLiveExplicitlyReconnects() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val controller = service(app)
+        val buffers = mutableListOf<RadioBuffer>()
+        controller.get().createRadioBuffer = { station ->
+            RadioBuffer(app.cacheDir, station.url, capture = false, pauseLimitMs = 200).also { buffer ->
+                buffers.add(buffer)
+                val audio = javaClass.getResourceAsStream("/radio/silence.mp3")!!.use { it.readBytes() }
+                repeat(12) { buffer.window.append(audio, 2_100_000, "mp3") }
+            }
+        }
+        try {
+            controller.get().startRadio(app.radios.read().first().id, play = false)
+            val p = player(controller.get())
+            val deadline = System.nanoTime() + 5_000_000_000L
+            while ((!p.isCurrentMediaItemSeekable || buffers[0].status.value != RadioBuffer.Status.PAUSE_LIMIT) && System.nanoTime() < deadline) {
+                shadowOf(Looper.getMainLooper()).idle(); Thread.sleep(10)
+            }
+            assertEquals(RadioBuffer.Status.PAUSE_LIMIT, buffers[0].status.value)
+            p.seekTo(10000)
+            val oldUri = p.currentMediaItem!!.localConfiguration!!.uri
+            controller.get().togglePlayback()
+            assertEquals(1, buffers.size)
+            assertEquals(oldUri, p.currentMediaItem!!.localConfiguration!!.uri)
+            assertEquals(10000L, p.currentPosition)
+            controller.get().goLive()
+            assertEquals(2, buffers.size)
+            assertNotEquals(oldUri, p.currentMediaItem!!.localConfiguration!!.uri)
+        } finally { controller.destroy() }
+    }
+
+    @Test fun queueSkipsBrokenItemsWithoutLoopingButExplicitPlayStops() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val episodes = queuedEpisodes(app)
+        val service = service(app)
+        try {
+            service.get().startQueue(play = false)
+            service.get().recoverPlaybackError(androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FAILED)
+            assertEquals(episodes[1].id, player(service.get()).currentMediaItem!!.mediaId)
+            assertTrue(app.store.library.value.episode(episodes[0].id)!!.error!!.contains("could not be played"))
+            service.get().recoverPlaybackError(androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FAILED)
+            assertEquals(episodes[2].id, player(service.get()).currentMediaItem!!.mediaId)
+            service.get().recoverPlaybackError(androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FAILED)
+            assertEquals(0, player(service.get()).mediaItemCount)
+            assertTrue(app.store.library.value.episodes.none { it.heard })
+            service.get().startEpisode(episodes[0].id, episodes.map { it.id }, 0, play = false)
+            service.get().recoverPlaybackError(androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FAILED)
+            assertEquals(0, player(service.get()).mediaItemCount)
+        } finally { service.destroy() }
+    }
+
+    @Test fun radioDucksAndPodcastRestoresSpeechFocus() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val episodes = queuedEpisodes(app)
+        val service = service(app)
+        try {
+            service.get().startRadio(app.radios.read().first().id, play = false)
+            assertEquals(androidx.media3.common.C.AUDIO_CONTENT_TYPE_MUSIC, player(service.get()).audioAttributes.contentType)
+            service.get().startEpisode(episodes[0].id, episodes.map { it.id }, 0, play = false)
+            assertEquals(androidx.media3.common.C.AUDIO_CONTENT_TYPE_SPEECH, player(service.get()).audioAttributes.contentType)
+        } finally { service.destroy() }
     }
 
     @Test fun bufferedRadioExposesSeekableTimelineAndPauseDoesNotReconnect() = runBlocking {

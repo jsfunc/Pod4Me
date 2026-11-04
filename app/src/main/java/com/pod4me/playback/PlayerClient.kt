@@ -15,7 +15,8 @@ import kotlinx.coroutines.flow.asStateFlow
 
 data class PlaybackUi(val connected: Boolean = false, val id: String? = null, val playing: Boolean = false,
     val position: Long = 0, val duration: Long = 0, val speed: Float = 1f, val hasNext: Boolean = false, val hasPrevious: Boolean = false,
-    val buffering: Boolean = false, val radioName: String? = null, val videoAspectRatio: Float = 16f / 9f, val canSeek: Boolean = false, val liveOffset: Long = 0)
+    val buffering: Boolean = false, val radioName: String? = null, val videoAspectRatio: Float = 16f / 9f, val canSeek: Boolean = false, val liveOffset: Long = 0, val radioStatus: String? = null, val radioHasAudio: Boolean = false,
+    val radioNotice: String? = null, val ended: Boolean = false, val sleepRemaining: Long = -1, val sleepEnd: Boolean = false)
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class PlayerClient internal constructor(
@@ -62,7 +63,9 @@ class PlayerClient internal constructor(
             p.duration.coerceAtLeast(0), p.playbackParameters.speed, p.hasNextMediaItem(), p.hasPreviousMediaItem(),
             p.playbackState == Player.STATE_BUFFERING,
             p.currentMediaItem?.mediaMetadata?.title?.toString().takeIf { live },
-            p.videoSize.let { if (it.width > 0 && it.height > 0) it.width * it.pixelWidthHeightRatio / it.height else 16f / 9f }, p.isCurrentMediaItemSeekable, p.currentLiveOffset.coerceAtLeast(0))
+            p.videoSize.let { if (it.width > 0 && it.height > 0) it.width * it.pixelWidthHeightRatio / it.height else 16f / 9f }, p.isCurrentMediaItemSeekable, p.currentLiveOffset.coerceAtLeast(0), p.sessionExtras.getString(PlaybackService.RADIO_STATUS),
+            p.sessionExtras.getBoolean(PlaybackService.RADIO_HAS_AUDIO), p.sessionExtras.getString(PlaybackService.RADIO_NOTICE),
+            p.playbackState == Player.STATE_ENDED, p.sessionExtras.getLong(PlaybackService.SLEEP_REMAINING, -1), p.sessionExtras.getBoolean(PlaybackService.SLEEP_END))
     }
     fun play(id: String, order: List<String>, position: Long = -1) {
         val args = Bundle().apply { putString("id", id); putStringArrayList("order", ArrayList(order)); putLong("position", position) }
@@ -73,6 +76,7 @@ class PlayerClient internal constructor(
         command(PlaybackService.MARK_UNHEARD, Bundle().apply { putString("id", id) })
     }
     fun playRadio(id: String) { command(PlaybackService.START_RADIO, Bundle().apply { putString("id", id) }) }
+    fun sleepTimer(durationMs: Long) { command(PlaybackService.SLEEP_TIMER, Bundle().apply { putLong("duration", durationMs) }) }
     fun stop() { command(PlaybackService.STOP) }
     fun toggle() { command(PlaybackService.TOGGLE) }
     fun playQueue() { command(PlaybackService.PLAY_QUEUE) }
@@ -86,7 +90,7 @@ class PlayerClient internal constructor(
         }, ContextCompat.getMainExecutor(app))
     }
     fun seek(position: Long) { requireController().seekTo(position.coerceAtLeast(0)) }
-    fun goLive() { requireController().seekToDefaultPosition(); requireController().play() }
+    fun goLive() { command(PlaybackService.GO_LIVE) }
     fun back() { requireController().seekBack() }
     fun forward() { requireController().seekForward() }
     fun previous() { requireController().seekToPreviousMediaItem() }

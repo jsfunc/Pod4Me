@@ -6,7 +6,7 @@ import java.util.Locale
 import kotlin.random.Random
 
 data class PodcastRecommendation(val title: String, val publisher: String, val feedUrl: String,
-    val appleUrl: String, val reason: String, val score: Int = 0, val topics: List<String> = emptyList())
+    val appleUrl: String, val reason: String, val score: Int = 0, val topics: List<String> = emptyList(), val artworkUrl: String? = null)
 data class DiscoveryQuery(val term: String, val source: String)
 data class PodcastFeedback(val vote: Int, val title: String, val publisher: String, val topics: List<String>)
 data class DiscoveryMemory(val feedback: Map<String, PodcastFeedback> = emptyMap(),

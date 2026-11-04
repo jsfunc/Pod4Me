@@ -21,7 +21,7 @@ import java.io.File
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
 
-class LibraryDatabase(context: Context) : SQLiteOpenHelper(context, "pod4me.db", null, 6) {
+class LibraryDatabase(context: Context) : SQLiteOpenHelper(context, "pod4me.db", null, 8) {
     private val app = context.applicationContext
     override fun onConfigure(db: SQLiteDatabase) { db.setForeignKeyConstraintsEnabled(true) }
     override fun onCreate(db: SQLiteDatabase) { executeAsset(db, "schema.sql") }
@@ -37,6 +37,8 @@ class LibraryDatabase(context: Context) : SQLiteOpenHelper(context, "pod4me.db",
         if (version == 3 && newVersion >= 4) { executeAsset(db, "migration_3_4.sql"); version = 4 }
         if (version == 4 && newVersion >= 5) { executeAsset(db, "migration_4_5.sql"); version = 5 }
         if (version == 5 && newVersion >= 6) { executeAsset(db, "migration_5_6.sql"); version = 6 }
+        if (version == 6 && newVersion >= 7) { executeAsset(db, "migration_6_7.sql"); version = 7 }
+        if (version == 7 && newVersion >= 8) { executeAsset(db, "migration_7_8.sql"); version = 8 }
         check(version == newVersion) { "A migration from $oldVersion to $newVersion is required" }
     }
 }
@@ -51,7 +53,7 @@ class LibraryStore(private val context: Context) : AutoCloseable {
     val activeEpisode = AtomicReference<String?>(null)
     private val progressEpochs = java.util.concurrent.ConcurrentHashMap<String, Long>()
     fun progressEpoch(id: String): Long = progressEpochs[id] ?: 0L
-    private val projection = "id,feed_id,title,audio_url,published,duration,downloaded,path,expiry,stars,position,heard,download_id,manager_id,error,new_in_last_refresh,is_video"
+    private val projection = "id,feed_id,title,audio_url,published,duration,downloaded,path,expiry,stars,position,heard,download_id,manager_id,error,new_in_last_refresh,is_video,byte_size"
     private val manager = context.getSystemService(DownloadManager::class.java)
     private val directory: File get() = requireNotNull(context.getExternalFilesDir(Environment.DIRECTORY_PODCASTS)) { "Download storage is unavailable" }
 
@@ -70,7 +72,10 @@ class LibraryStore(private val context: Context) : AutoCloseable {
                     val replacement = updated.copy(lists = previous?.lists ?: emptySet())
                     mutableLibrary.value = old.copy(episodes = old.episodes.map { if (it.id == episodeId) replacement else it },
                         catalogueRevision = old.catalogueRevision + if (previous?.heard != replacement.heard) 1 else 0)
-                } else mutableLibrary.value = snapshot(db).copy(catalogueRevision = old.catalogueRevision + 1)
+                } else {
+                    val fresh = snapshot(db).copy(catalogueRevision = old.catalogueRevision)
+                    if (fresh != old) mutableLibrary.value = fresh.copy(catalogueRevision = old.catalogueRevision + 1)
+                }
             }
             result
         }
@@ -84,7 +89,15 @@ class LibraryStore(private val context: Context) : AutoCloseable {
             "hot" to "https://feeds.twit.tv/hot_video_hd.xml",
         )) {
             val exists = db.rawQuery("SELECT 1 FROM feeds WHERE url=?", arrayOf(url)).use { it.moveToFirst() }
-            if (!exists) context.assets.open("video-samples/$name.xml").use { saveFeed(db, url, FeedParser.parse(it, url)) }
+            context.assets.open("video-samples/$name.xml").use { input ->
+                val parsed = FeedParser.parse(input, url)
+                if (!exists) saveFeed(db, url, parsed)
+                else for (item in parsed.items()) {
+                    if (item.byteSize() != null) db.update("episodes", values("byte_size" to item.byteSize()),
+                        "feed_id IN (SELECT id FROM feeds WHERE url=?) AND guid=? AND audio_url=? AND byte_size IS NULL",
+                        arrayOf(url, item.guid(), item.audioUrl()))
+                }
+            }
         }
     }
 
@@ -144,6 +157,26 @@ class LibraryStore(private val context: Context) : AutoCloseable {
             .putString("order", org.json.JSONArray(playback.order).toString()).putInt("cursor", playback.cursor).apply()
     }
 
+    /** Commit a refresh only if this is still the same subscribed address. */
+    suspend fun applyRefresh(feed: Feed, response: FeedResponse, now: Long = System.currentTimeMillis()) = write { db ->
+        val current = db.rows("SELECT url,subscribed FROM feeds WHERE id=?", feed.id) { it.str("url") to it.long("subscribed") }.firstOrNull()
+        if (current != (feed.url to 1L)) return@write
+        val destination = response.parsed?.newFeedUrl()?.takeIf(String::isNotBlank) ?: response.permanentUrl ?: feed.url
+        FeedParser.httpUrl(destination)
+        require(!YouTubeChannels.isYouTube(destination)) { "A podcast feed cannot move to a YouTube channel" }
+        val duplicate = db.rows("SELECT id FROM feeds WHERE url=? AND id<>?", destination, feed.id) { it.str("id") }.isNotEmpty()
+        check(!duplicate) { "This feed moved to an existing subscription. Review both subscriptions before merging: $destination" }
+        if (response.parsed != null) saveFeed(db, feed.url, response.parsed, feed.id)
+        else {
+            db.update("episodes", values("new_in_last_refresh" to 0), "feed_id=? AND new_in_last_refresh=1", arrayOf(feed.id))
+            db.update("feeds", values("error" to null), "id=?", arrayOf(feed.id))
+        }
+        // A publisher's new-feed-url can point beyond the response that supplied the validators.
+        val differentResource = destination != feed.url && destination != response.permanentUrl
+        db.update("feeds", values("url" to destination, "etag" to if (differentResource) null else response.etag,
+            "last_modified" to if (differentResource) null else response.lastModified, "last_refreshed" to now), "id=?", arrayOf(feed.id))
+    }
+
     suspend fun saveFeed(url: String, parsed: FeedParser.Feed, existingId: String? = null): String = write { db -> saveFeed(db, url, parsed, existingId) }
     private fun saveFeed(db: SQLiteDatabase, url: String, parsed: FeedParser.Feed, existingId: String? = null): String {
         val known = db.rows("SELECT id FROM feeds WHERE url=?", url) { it.str("id") }.firstOrNull()
@@ -160,17 +193,23 @@ class LibraryStore(private val context: Context) : AutoCloseable {
         db.update("episodes", values("new_in_last_refresh" to 0), "feed_id=? AND new_in_last_refresh=1", arrayOf(id))
         for (item in parsed.items()) {
             val episodeId = db.rows("SELECT id FROM episodes WHERE feed_id=? AND guid=?", id, item.guid()) { it.str("id") }.firstOrNull()
-            val metadata = values("title" to item.title(), "audio_url" to item.audioUrl(), "description" to item.description(), "published" to item.published(), "is_video" to if (item.video()) 1 else 0)
+            val metadata = values("title" to item.title(), "audio_url" to item.audioUrl(), "description" to item.description(), "published" to item.published(), "is_video" to if (item.video()) 1 else 0, "byte_size" to item.byteSize())
             if (episodeId == null) {
                 metadata.put("id", UUID.randomUUID().toString()); metadata.put("feed_id", id)
                 metadata.put("guid", item.guid()); metadata.put("duration", item.duration())
                 metadata.put("new_in_last_refresh", 1)
                 db.insertOrThrow("episodes", null, metadata)
             } else db.update("episodes", metadata,
-                "id=? AND (title<>? OR audio_url<>? OR description<>? OR published<>? OR is_video<>?)",
-                arrayOf(episodeId, item.title(), item.audioUrl(), item.description(), item.published().toString(), if (item.video()) "1" else "0"))
+                "id=? AND (title<>? OR audio_url<>? OR description<>? OR published<>? OR is_video<>? OR byte_size IS NOT ?)",
+                arrayOf(episodeId, item.title(), item.audioUrl(), item.description(), item.published().toString(), if (item.video()) "1" else "0", item.byteSize()?.toString()))
         }
         return id
+    }
+    suspend fun playbackError(id: String, message: String?) = write(episodeId = id) { db ->
+        db.update("episodes", values("error" to message), "id=?", arrayOf(id))
+    }
+    suspend fun clearPlaybackError(id: String) = write(episodeId = id) { db ->
+        db.update("episodes", values("error" to null), "id=? AND error LIKE 'This download could not be played.%'", arrayOf(id))
     }
     suspend fun feedError(id: String, error: String) = write { db -> db.update("feeds", values("error" to error), "id=?", arrayOf(id)) }
     suspend fun unsubscribe(id: String) = write { db ->
@@ -214,6 +253,7 @@ class LibraryStore(private val context: Context) : AutoCloseable {
     }
     suspend fun membership(id: String, list: String, included: Boolean) = write { db ->
         if (list == "unheard" || list == "heard") {
+            require(episode(db, id)?.isDownloaded == true) { "Download this episode before changing Heard status" }
             val heard = if (list == "unheard") !included else included
             setHeard(db, id, heard, System.currentTimeMillis())
         } else if (included) db.insertWithOnConflict("memberships", null, values("episode_id" to id, "list_id" to list), SQLiteDatabase.CONFLICT_IGNORE)
@@ -229,7 +269,7 @@ class LibraryStore(private val context: Context) : AutoCloseable {
         val actualDuration = duration.takeIf { it > 0 } ?: previous.duration
         if (previous.position == position.coerceAtLeast(0) && previous.duration == actualDuration) return@write
         db.update("episodes", values("position" to position.coerceAtLeast(0), "duration" to actualDuration), "id=?", arrayOf(id))
-        if (!previous.heard && Policy.isHeard(position, actualDuration)) setHeard(db, id, true, System.currentTimeMillis())
+        if (previous.isDownloaded && !previous.heard && Policy.isHeard(position, actualDuration)) setHeard(db, id, true, System.currentTimeMillis())
     }
     private fun setHeard(db: SQLiteDatabase, id: String, heard: Boolean, now: Long) {
         val ep = episode(db, id) ?: return
@@ -244,15 +284,18 @@ class LibraryStore(private val context: Context) : AutoCloseable {
     suspend fun renameBookmark(id: Long, name: String) = write { db -> db.update("bookmarks", values("name" to name.trim()), "id=?", arrayOf(id.toString())) }
     suspend fun deleteBookmark(id: Long) = write { db -> db.delete("bookmarks", "id=?", arrayOf(id.toString())) }
 
-    suspend fun download(id: String) = write { db ->
+    suspend fun download(id: String, allowLargeMetered: Boolean = false) = write { db ->
         val ep = requireNotNull(episode(db, id))
         if (ep.path != null || ep.downloadId != null) return@write
+        val large = (ep.byteSize ?: 0) > LARGE_DOWNLOAD_BYTES
+        if (large && !allowLargeMetered && context.getSystemService(android.net.ConnectivityManager::class.java).isActiveNetworkMetered)
+            throw DownloadConfirmationRequired(ep)
         FeedParser.httpUrl(ep.audioUrl)
         val file = File(directory, "$id.audio")
         if (file.exists()) check(file.delete()) { "Could not remove an incomplete download" }
         val request = DownloadManager.Request(Uri.parse(ep.audioUrl))
             .setTitle(ep.title).setDescription("Pod4Me")
-            .setAllowedOverMetered(true).setAllowedOverRoaming(false)
+            .setAllowedOverMetered(!large || allowLargeMetered).setAllowedOverRoaming(false)
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
             .setDestinationUri(Uri.fromFile(file))
         val downloadId = manager.enqueue(request)
@@ -287,9 +330,10 @@ class LibraryStore(private val context: Context) : AutoCloseable {
                         } else {
                             val days = db.rows("SELECT expiry_days FROM feeds WHERE id=?", ep.feedId) { it.nullLong("expiry_days")?.toInt() }.firstOrNull()
                             val now = System.currentTimeMillis()
+                            progressEpochs[ep.id] = progressEpoch(ep.id) + 1
                             val deadline = Policy.downloadExpiry(now, days)
                             db.update("episodes", values("download_id" to null, "manager_id" to downloadId, "path" to file.absolutePath, "downloaded" to now,
-                                "expiry" to if (ep.heard) Policy.heardExpiry(deadline, now) else deadline, "error" to null), "id=?", arrayOf(ep.id))
+                                "expiry" to deadline, "heard" to 0, "position" to 0L, "error" to null), "id=?", arrayOf(ep.id))
                             db.execSQL("INSERT OR IGNORE INTO memberships SELECT ?,list_id FROM feed_defaults WHERE feed_id=?", arrayOf(ep.id, ep.feedId))
                         }
                     }
@@ -314,6 +358,19 @@ class LibraryStore(private val context: Context) : AutoCloseable {
             .containsMatchIn(prefix)
     }
 
+    suspend fun deleteListDownloads(filter: String, confirmedIds: Set<String>): BulkDeleteResult = write { db ->
+        val current = snapshot(db)
+        var deleted = 0; var skipped = 0; var failed = 0
+        for (id in confirmedIds) {
+            val ep = current.episode(id)
+            if (ep == null || !ep.matchesDownloadFilter(filter) || !Policy.canDelete(ep.protected, activeEpisode.get() == id)) { skipped++; continue }
+            try { deleteFile(ep); clearDownload(db, id); deleted++ }
+            catch (e: Exception) {
+                db.update("episodes", values("error" to (e.message ?: "Could not delete this download")), "id=?", arrayOf(id)); failed++
+            }
+        }
+        BulkDeleteResult(deleted, skipped, failed)
+    }
     suspend fun deleteAudio(id: String) = write { db ->
         val ep = episode(db, id) ?: return@write
         require(!isProtected(db, id)) { "Remove this episode from 4ever before deleting it" }
@@ -367,7 +424,7 @@ class LibraryStore(private val context: Context) : AutoCloseable {
         val memberships = db.rows("SELECT episode_id,list_id FROM memberships") { it.str("episode_id") to it.str("list_id") }.groupBy({ it.first }, { it.second })
         val defaults = db.rows("SELECT feed_id,list_id FROM feed_defaults") { it.str("feed_id") to it.str("list_id") }.groupBy({ it.first }, { it.second })
         return Library(true,
-            db.rows("SELECT * FROM feeds ORDER BY name COLLATE NOCASE") { Feed(it.str("id"), it.str("url"), it.str("name"), it.nullLong("expiry_days")?.toInt(), defaults[it.str("id")]?.toSet() ?: emptySet(), it.nullStr("error"), it.nullStr("artwork_url"), it.long("subscribed") == 1L) },
+            db.rows("SELECT * FROM feeds ORDER BY name COLLATE NOCASE") { Feed(it.str("id"), it.str("url"), it.str("name"), it.nullLong("expiry_days")?.toInt(), defaults[it.str("id")]?.toSet() ?: emptySet(), it.nullStr("error"), it.nullStr("artwork_url"), it.long("subscribed") == 1L, it.nullStr("etag"), it.nullStr("last_modified"), it.nullLong("last_refreshed")) },
             db.rows("SELECT $projection FROM episodes") { readEpisode(it).let { ep -> ep.copy(lists = memberships[ep.id]?.toSet() ?: emptySet()) } },
             db.rows("SELECT * FROM lists ORDER BY system DESC,name COLLATE NOCASE") { TrackList(it.str("id"), it.str("name"), it.long("system") == 1L) },
             db.rows("SELECT * FROM bookmarks ORDER BY position") { Bookmark(it.long("id"), it.str("episode_id"), it.long("position"), it.str("name")) },
@@ -377,7 +434,7 @@ class LibraryStore(private val context: Context) : AutoCloseable {
     private fun readEpisode(c: Cursor) = Episode(c.str("id"), c.str("feed_id"), c.str("title"), c.str("audio_url"), "",
         c.long("published"), c.long("duration"), c.nullLong("downloaded"), c.nullStr("path"), c.nullLong("expiry"), c.long("stars").toInt(),
         c.long("position"), c.long("heard") == 1L, c.nullLong("download_id"), c.nullStr("error"), managerId = c.nullLong("manager_id"),
-        newInLastRefresh = c.long("new_in_last_refresh") == 1L, isVideo = c.long("is_video") == 1L)
+        newInLastRefresh = c.long("new_in_last_refresh") == 1L, isVideo = c.long("is_video") == 1L, byteSize = c.nullLong("byte_size"))
 }
 
 private fun Cursor.str(name: String): String = getString(getColumnIndexOrThrow(name))
@@ -408,3 +465,8 @@ internal fun downloadFailure(reason: Int): String = when (reason) {
     in 400..599 -> "The server returned HTTP $reason"
     else -> "Android could not complete the download"
 }
+
+internal const val LARGE_DOWNLOAD_BYTES = 200_000_000L
+class DownloadConfirmationRequired(val episode: Episode) : IllegalStateException("Confirm this large download on a metered connection")
+
+data class BulkDeleteResult(val deleted: Int, val skipped: Int, val failed: Int)

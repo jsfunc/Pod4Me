@@ -1,0 +1,217 @@
+POD4ME — REVIEW OF THE MODIFICATIONS MADE AFTER THE 2026-11-04 AUDIT
+====================================================================
+Purpose: verify the corrections made for the security and bug findings in audit.txt
+(2026-11-04, Android only). This is a running log. Each review round is appended below with
+the exact code state it tested. Earlier rounds are kept unchanged, so a verdict can be traced
+to the code it applies to. The "Open items" section always reflects the latest round.
+
+Verdicts: FIXED = verified by reading the code plus passing tests (the project's tests or the
+reviewer's probes); FIXED (code only) = correct on reading but not exercised by a test;
+PARTIAL = part of the finding remains; NOT ADDRESSED; NEW = problem introduced by the
+modifications; NEEDS PHONE = only a device test can settle it.
+
+
+OPEN ITEMS (as of round 1)
+==========================
+  N1  NEW     A station URL that never worked takes ~5 min 15 s to be declared unavailable,
+              and the final status says "Buffer kept" when nothing was buffered.
+  N2  NEW     Any podcast playback error, including audio-output errors, stamps the episode
+              "This download could not be played. Delete it and download it again.", and the
+              message is never cleared.
+  N3  NEW     Resume/Play at the end of a finished radio window (pause limit or station
+              unavailable) appears to do nothing. Code reading only.
+  N4  NEW     The "paused position has expired" notice is shown in the error dialog ("Could not
+              complete action").
+  H1  NEEDS PHONE  Recorder side fixed. The player's behaviour during a real outage is untested.
+  L4  PARTIAL French month abbreviations without the dot (janv, avr, juil) still give "Date
+              unknown".
+  L9  PARTIAL Initialization sections are cached; encryption keys are still fetched per segment.
+  L8, L10, L11  NOT ADDRESSED (performance and quality items, not bugs or security).
+  S1, S2  Unchanged by user decision (2026-11-01).
+
+
+ROUND 1 — 2026-11-04, 17:02 snapshot
+====================================
+Code state tested
+-----------------
+  Base commit ccd3b10 plus the uncommitted working tree as of 2026-11-04 17:02 (version
+  1.0.21 / versionCode 29, SQLite schema 7 with migration_6_7.sql, backup format 2). The tree was
+  copied to a scratch snapshot and all tests ran on that copy. At 17:13, after the tests, the
+  code was still byte-identical to the snapshot; only README.md and docs/handover.md had
+  changed. Snapshot fingerprint (sha256 over the file list, excluding audit.txt):
+  b1ea70c1929549a2caf2d89be510eb9ac8509916034382b9f93b939c31c3cdfb.
+  Modified source: PlaybackService, PlayerClient, RadioBuffer, RadioWindow, RadioPreferences,
+  LibraryStore, FeedParser, Models, AppModel, MainActivity, PodApplication, PodApp, RadioScreen,
+  schema.sql, migration_6_7.sql, build.gradle.kts, tools/build-apk.sh. New tests:
+  VideoRedirectTest plus additions to RadioBufferTest, PlaybackServiceTest, LibraryStoreTest,
+  LibraryMigrationTest, RadioPreferencesTest, AppModelTest and CoreChecks.
+
+Executed
+--------
+  java tools/CoreTestLauncher.java ............ PASS, 127 core checks
+  python3 -I tools/check_schema.py ............ PASS, 11 schema/XML checks
+  ./gradlew :app:testDebugUnitTest :app:lintRelease --offline (fresh build of the snapshot,
+      60/60 tasks executed)
+      unit tests ............................. PASS, 132 tests, 0 failures/errors/skips
+      release lint ........................... 0 errors, 24 warnings (19 UseKtx,
+                                               2 ModifierParameter, 1 GradleDependency,
+                                               1 ExportedService, 1 ObsoleteSdkInt)
+  Reviewer probes. AuditProbeTest.kt, 6 Robolectric tests, kept only in the scratch snapshot and
+  NOT added to the repository; results below:
+      P1 dead URL (HTTP 404) ................. 25 requests before UNAVAILABLE (default schedule
+                                               1+2+4+8+15×20 = 315 s)
+      P2 station web page (HTML 200) ......... 25 requests (page re-downloaded every time)
+      P3 .pls entry "file:///etc/passwd" ..... never requested; only the .pls URL was fetched
+      P4 unavailable station with no audio ... recoverPlaybackError returns silently: no message,
+                                               station stays loaded
+      P5 Resume at end of finished window .... inconclusive: Robolectric never reaches
+                                               STATE_READY, so N3 rests on code reading
+      P6 audio-output error (code 5001) ...... episode stamped "could not be played…"; still
+                                               present after a later successful start/progress
+  Standalone JVM probe of FeedParser: 26 pubDate forms and 7 enclosure length values.
+Not executed: release assembly/signing, the instrumented tests, any phone. ADB lists no device.
+
+Verdicts per audit finding
+--------------------------
+H1  Radio outage destroys the rewind buffer ............... FIXED in the recorder; NEEDS PHONE
+    RadioWindow.read no longer throws for existing segments after a failure; it fails only when
+    nothing has been captured. RadioBuffer reconnects with backoff (1, 2, 4, 8, then 15 s; 24
+    retries, counter reset whenever audio arrives) and marks a discontinuity after reconnecting.
+    HLS keeps its last sequence across reconnects, so segments are not duplicated, and a failed
+    playlist poll is retried in place. Retry exhaustion appends #EXT-X-ENDLIST so the retained
+    audio stays playable. The service no longer unloads on radio I/O errors (codes 2000–2999):
+    after 1 s it re-prepares the same local source.
+    Covered by 6 new RadioBufferTest cases plus the service tests. Those tests call
+    recoverPlaybackError directly. Nothing tests ExoPlayer actually raising the error during
+    an outage (playlist-stuck or load errors), the resulting re-prepare loop, or the position
+    after re-prepare. Settle it on the S24: start France Info, turn Wi-Fi off for 1–2 minutes
+    (with mobile data off), first while playing live, then while paused 10 minutes behind live;
+    turn it back on. Expect "Reconnecting…", no error dialog, the buffer kept, and playback
+    continuing.
+
+H2  Video streaming refuses http↔https redirects .......... FIXED
+    DefaultDataSource.Factory(this, videoHttpFactory()) with setAllowCrossProtocolRedirects(true)
+    and a Pod4Me User-Agent. VideoRedirectTest checks http→https through a local TLS server and
+    that the Range header survives the redirect.
+
+M1  Paused radio downloads indefinitely ................... FIXED
+    setPaused() stops capturing 30 min after a pause (any pause source, via
+    onPlayWhenReadyChanged). The window is finished with ENDLIST and the status becomes
+    PAUSE_LIMIT. A partial wake lock is held only while paused and still recording, with a
+    30-minute timeout; it is released on resume, on stop and in onDestroy. Back to live
+    reconnects explicitly. Tested (RadioBufferTest, PlaybackServiceTest). See N3.
+
+M2  One unplayable file stops the playlist ................ FIXED
+    recoverPlaybackError marks the item failed and continues with the next playable item after
+    an auto-advance or queue start (codes 2000–4999). It never loops over items already marked
+    failed. An explicitly chosen episode still stops. rebuildUpcoming now also removes
+    preceding items whose files vanished. Tested (queueSkipsBrokenItems…). See N2.
+
+M3  No size information / multi-GB downloads on mobile data  FIXED (with stated limits)
+    Enclosure length (and Media RSS fileSize) is parsed into byte_size (schema 7, explicit
+    additive migration, tested 6→7 upgrade; existing seeded samples are back-filled). The size
+    is shown as "· N MB / N.N GB" on available-episode rows. If the size is over 200 MB and the
+    active network is metered, a confirmation dialog appears. Large downloads started on an
+    unmetered network use setAllowedOverMetered(false), so they wait rather than switch to
+    mobile data. Parser probe: 0, negative, non-numeric, overflowing and space-padded lengths are
+    ignored (null), and 3010290787 is kept. Limits: no prompt when the feed gives no size, and
+    publisher sizes can be wrong.
+
+L1  Foreground/rotation reloads the whole library ......... FIXED
+    The controller connects before maintenance. Seeding and initialization run once per process
+    (PodApplication.initializeOnce). Reconcile, expiry and storage run once per foreground
+    session (needsForegroundMaintenance, set in onStop only when not isChangingConfigurations).
+    An unchanged snapshot no longer bumps catalogueRevision. Tested.
+
+L2  HLS picks the lowest bitrate .......................... FIXED
+    Picks the highest audio-only variant ≤ 192 kbps, falling back to the lowest. Tested.
+
+L3  .m3u / .pls wrappers rejected ......................... FIXED
+    Playlists without #EXT-X- lines are treated as wrappers: the first FileN= or http(s) line is
+    followed, one level only, and validated with FeedParser.httpUrl (probe P3). Minor: a
+    response whose path ends in .m3u/.pls is treated as a playlist even if it is audio. That
+    case is improbable and then fails through the retry path (N1).
+
+L4  pubDate forms → "Date unknown" ........................ PARTIAL
+    Now parsed: "+01:00", "Z", CET/CEST/MET/EET/EEST/BST/AEST, "Sept", "déc"/"févr" without the
+    dot, "yyyy-MM-dd HH:mm[:ss]", fractional ISO, two-digit year with "+01:00". Still unknown:
+    "03 janv 2026 …", "03 avr 2026 …", "03 juil 2026 …" (French abbreviations without the
+    dot). Fix: generalize the dot insertion to every French short month (janv, févr, avr, juil,
+    sept, oct, nov, déc).
+
+L5  One invalid saved station hides all radios ............ FIXED
+    Invalid rows are skipped. The original JSON is kept under "stations_recovery" and the user
+    is told once. Tested.
+
+L6  Radio typed as speech (pause instead of duck) ......... FIXED
+    setRadioAudio(true/false) on every radio/podcast/video transition and on resumption. Tested.
+
+L7  Network wake mode kept after radio/video .............. FIXED (code only)
+    WAKE_MODE_LOCAL is set in stopPlayback and in the podcast resumption branch.
+
+L8  O(library) main-thread work per progress save ......... NOT ADDRESSED
+L9  HLS keys/init refetched per segment ................... PARTIAL (init cached, keys not)
+L10 Completed-download notifications accumulate ........... NOT ADDRESSED
+L11 Carried-over minor items ............................... NOT ADDRESSED
+
+Security .................................................. NO REGRESSION
+    New surfaces checked: wrapper entries restricted to http(s) without credentials (P3); new
+    GO_LIVE command registered only for the app's own controller, and onCustomCommand still
+    refuses everything except ±10 s from other packages; wake lock time-bounded; session extras
+    expose only the radio status name; RadioPreferences recovery copy is app-private. The
+    damaged stations list is kept in an app-private preference file. VideoRedirectTest
+    swaps the global HttpsURLConnection socket factory only inside a try/finally.
+    INFO: app/src/test/resources/radio/localhost-test.p12 is a self-signed CN=localhost key
+    (password "testing-only", valid to 2126). It is in test resources, so not in the APK, and
+    harmless. Once committed, GitHub secret scanning may still flag it as a private key;
+    alternatively generate it at test time.
+    S1 (debug-derived signing key, keystore auto-copy) and S2 (cleartext allowed) unchanged by
+    user decision. build-apk.sh version check updated consistently to 29 / 1.0.21.
+
+New problems introduced by the modifications
+--------------------------------------------
+N1  MEDIUM  A never-working station is retried for ~5 minutes, then reported misleadingly
+    Where: RadioBuffer capture loop (retryLimit 24, backoff up to 15 s);
+           PlaybackService.recoverPlaybackError (radio branch returns without reporting);
+           RadioScreen.radioStatus ("Station unavailable · Buffer kept · Back to live retries").
+    What:  The reconnect logic does not distinguish "connection lost after audio" from "never
+           received audio". A mistyped custom URL, an HTTP 404/403, or a station's web page
+           shows "Reconnecting…" for about 5 min 15 s (probes P1/P2: 25 requests; an HTML page
+           is re-downloaded each time). It then shows "Station unavailable · Buffer kept"
+           although nothing was buffered, and no error message (probe P4). Before the
+           modifications this failed immediately with "Could not play X…".
+    Fix:   If no segment was ever appended, stop after 2–3 attempts, or immediately on an HTTP
+           4xx or an HTML response, then report the old error (handlePlaybackError). Show "Buffer
+           kept" only when window.hasAudio.
+
+N2  LOW     Any podcast error blames the download, permanently
+    Where: PlaybackService.recoverPlaybackError (store.playbackError for every error code);
+           LibraryStore.playbackError (the error column is cleared only by download()).
+    What:  Errors unrelated to the file, such as ERROR_CODE_AUDIO_TRACK_INIT_FAILED (5001, seen
+           with audio-route/Bluetooth problems), stamp "This download could not be played.
+           Delete it and download it again." The message stays after the episode later plays
+           normally (probe P6).
+    Fix:   Record the message only for codes 2000–4999 (I/O, parsing, decoding), and clear the
+           episode's error when it plays successfully (first progress save or STATE_READY).
+
+N3  LOW     Resume does nothing at the end of a finished radio window (code reading)
+    Where: PlaybackService.togglePlayback: for liveStation it only calls prepare() when IDLE,
+           then play().
+    What:  After PAUSE_LIMIT or UNAVAILABLE the window ends with ENDLIST. Once the retained audio
+           has played out, the player is in STATE_ENDED, and play() without a seek has no effect.
+           Resume (Player tab, mini-player, notification, headset) then appears dead; only Back
+           to live works. The status text points to Back to live, which mitigates it. Probe P5
+           could not reach STATE_READY under Robolectric, so this is not demonstrated.
+    Fix:   In togglePlayback, if liveStation != null and the state is ENDED, call goLive().
+           Check it on the phone with check 53.
+
+N4  INFO    "The paused position has expired. Playing the oldest retained radio audio." is
+    reported through app.report, so it appears in the "Could not complete action" error dialog.
+    It is informational; a notice or status line would fit better.
+
+Round 1 conclusion
+------------------
+All security and bug findings of audit.txt that were addressed pass their tests. H2, M1, M2, M3,
+L1–L3 and L5–L7 are verified in code and tests. H1 is fixed in the recorder but needs the
+Wi-Fi-off phone test. L4 and L9 are partial. Fix N1 before release, because it is a visible
+regression for custom stations. N2–N4 are small. Nothing here was tested on a phone.

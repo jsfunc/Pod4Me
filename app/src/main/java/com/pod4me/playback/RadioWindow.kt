@@ -22,10 +22,13 @@ internal class RadioWindow(
     private var targetSeconds = 1
     private var closed = false
     private var failure: IOException? = null
+    private var finished = false
+    val hasAudio: Boolean get() = synchronized(lock) { segments.isNotEmpty() }
+    val latestSequence: Long get() = synchronized(lock) { sequence }
 
     fun append(audio: ByteArray, duration: Long, extension: String, discontinuous: Boolean = false,
         init: ByteArray? = null, key: ByteArray? = null, iv: String? = null) = synchronized(lock) {
-        if (closed) return@synchronized
+        if (closed || finished) return@synchronized
         require(duration in 1..120_000_000 && extension in setOf("mp3", "aac", "ts", "m4s"))
         if (discontinuous) discontinuity++
         check(directory.isDirectory || directory.mkdirs()) { "Could not create the radio buffer" }
@@ -53,19 +56,21 @@ internal class RadioWindow(
     }
 
     fun fail(error: IOException) = synchronized(lock) { failure = error; lock.notifyAll() }
+    fun finish() = synchronized(lock) { finished = true; lock.notifyAll() }
     fun close() = synchronized(lock) { closed = true; lock.notifyAll() }
 
     fun read(name: String): ByteArray = synchronized(lock) {
         if (name == "live.m3u8") {
             val deadline = System.nanoTime() + 35_000_000_000L
-            while (segments.size < 2 && !closed && failure == null) {
+            while (segments.size < 2 && !closed && !finished && failure == null) {
                 val remaining = (deadline - System.nanoTime()) / 1_000_000
                 if (remaining <= 0) throw IOException("The station did not provide audio in time")
                 lock.wait(remaining.coerceAtLeast(1))
             }
         }
         if (closed) throw IOException("Radio buffer closed")
-        failure?.let { throw it }
+        // An upstream outage must never invalidate audio already captured locally.
+        if (segments.isEmpty()) throw failure ?: IOException("No radio audio has been received yet")
         if (name != "live.m3u8") {
             if (segments.none { name in it.files }) throw IOException("This part of the radio buffer has expired")
             return@synchronized File(directory, name).readBytes()
@@ -85,6 +90,7 @@ internal class RadioWindow(
                 append(String.format(Locale.US, "#EXTINF:%.6f,\n", segment.durationUs / 1_000_000.0))
                 append(segment.name).append('\n')
             }
+            if (finished) append("#EXT-X-ENDLIST\n")
         }.toByteArray()
     }
 }

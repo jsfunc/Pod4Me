@@ -21,12 +21,16 @@ public final class FeedParser {
     public static final int MAX_DESCRIPTION_CHARS = 1_048_576;
     private static final String SHORTENED = "\n[Show notes shortened because they exceed the size limit.]";
     public static final int MAX_BYTES = 64 * 1024 * 1024;
-    public record Item(String guid, String title, String audioUrl, String description, long published, long duration, boolean video) {
+    public record Item(String guid, String title, String audioUrl, String description, long published, long duration, boolean video, Long byteSize) {
+        public Item(String guid, String title, String audioUrl, String description, long published, long duration, boolean video) {
+            this(guid, title, audioUrl, description, published, duration, video, null);
+        }
         public Item(String guid, String title, String audioUrl, String description, long published, long duration) {
             this(guid, title, audioUrl, description, published, duration, false);
         }
     }
-    public record Feed(String title, List<Item> items, String artworkUrl, int skippedItems) {
+    public record Feed(String title, List<Item> items, String artworkUrl, int skippedItems, String newFeedUrl) {
+        public Feed(String title, List<Item> items, String artworkUrl, int skippedItems) { this(title, items, artworkUrl, skippedItems, ""); }
         public Feed(String title, List<Item> items) { this(title, items, "", 0); }
         public Feed(String title, List<Item> items, String artworkUrl) { this(title, items, artworkUrl, 0); }
     }
@@ -88,6 +92,7 @@ public final class FeedParser {
         private String rssNamespace = "";
         private String mediaAudio = "";
         private boolean video, mediaVideo;
+        private Long byteSize, mediaByteSize;
         private boolean truncated;
         private int captureLimit;
         private String audio = "", hrefImage = "", rssImage = "", field;
@@ -119,16 +124,18 @@ public final class FeedParser {
                 String type = attributes.getValue("type");
                 if (type != null && (type.toLowerCase(Locale.ROOT).startsWith("audio/") || type.toLowerCase(Locale.ROOT).startsWith("video/"))) {
                     mediaAudio = resolve(source, attributes.getValue("url"));
+                    mediaByteSize = positiveLength(attributes.getValue("fileSize"));
                     mediaVideo = type.toLowerCase(Locale.ROOT).startsWith("video/");
                 }
             }
             if (depth == channelDepth + 1 && name.equals(atom ? "entry" : "item") && canonical(uri)) {
-                entry = new HashMap<>(); entryDepth = depth; audio = ""; mediaAudio = ""; video = mediaVideo = false;
+                entry = new HashMap<>(); entryDepth = depth; audio = ""; mediaAudio = ""; video = mediaVideo = false; byteSize = mediaByteSize = null;
             } else if (entry != null && depth == entryDepth + 1) {
                 if (audio.isEmpty() && canonical(uri) && ((!atom && name.equals("enclosure")) || (atom && name.equals("link") && "enclosure".equals(attributes.getValue("rel"))))) {
                     String type = Optional.ofNullable(attributes.getValue("type")).orElse("").split(";", 2)[0].trim().toLowerCase(Locale.ROOT);
                     if (type.isEmpty() || type.startsWith("audio/") || type.startsWith("video/") || type.equals("application/octet-stream") || type.equals("application/ogg")) {
                         audio = resolve(source, attributes.getValue(atom ? "href" : "url"));
+                        byteSize = positiveLength(attributes.getValue("length"));
                         video = type.startsWith("video/") || ((type.isEmpty() || type.equals("application/octet-stream")) && audio.toLowerCase(Locale.ROOT).matches(".*\\.(mp4|m4v|webm|mov)(\\?.*)?$"));
                     }
                 }
@@ -136,6 +143,7 @@ public final class FeedParser {
                 else if (CONTENT.equals(uri) && name.equals("encoded")) beginCapture("encoded");
                 else if (ITUNES.equals(uri) && Set.of("title", "summary", "duration").contains(name)) beginCapture("itunes:" + name);
             } else if (entry == null && depth == channelDepth + 1) {
+                if (ITUNES.equals(uri) && name.equals("new-feed-url")) beginCapture("new-feed-url");
                 if (canonical(uri) && (name.equals("title") || (atom && (name.equals("logo") || name.equals("icon"))))) beginCapture(name);
                 if (name.equals("image") && ((!atom && canonical(uri)) || ITUNES.equals(uri))) {
                     if (!atom && canonical(uri)) imageDepth = depth;
@@ -182,7 +190,7 @@ public final class FeedParser {
             depth--;
         }
         private void finishEntry() {
-            if (audio.isEmpty()) { audio = mediaAudio; video = mediaVideo; }
+            if (audio.isEmpty()) { audio = mediaAudio; video = mediaVideo; byteSize = mediaByteSize; }
             if (audio.isEmpty()) { skippedItems++; return; }
             String guid = entry.getOrDefault(atom ? "id" : "guid", "");
             if (guid.isEmpty()) guid = audio;
@@ -190,12 +198,12 @@ public final class FeedParser {
             String title = first(entry.get("title"), entry.get("itunes:title"), "Untitled episode");
             String description = first(entry.get("encoded"), entry.get("content"), entry.get("description"), entry.get("summary"), entry.get("itunes:summary"));
             String published = first(entry.get("pubDate"), entry.get("published"), entry.get("updated"));
-            items.add(new Item(guid, title, audio, description, date(published), duration(entry.getOrDefault("itunes:duration", "")), video));
+            items.add(new Item(guid, title, audio, description, date(published), duration(entry.getOrDefault("itunes:duration", "")), video, byteSize));
         }
         Feed result() {
             if (!sawChannel) throw new IllegalArgumentException("This URL is not an RSS or Atom feed");
             String artwork = first(hrefImage, rssImage, resolve(source, feed.get("logo")), resolve(source, feed.get("icon")));
-            return new Feed(first(feed.get("title"), URI.create(source).getHost(), "Podcast"), List.copyOf(items), artwork, skippedItems);
+            return new Feed(first(feed.get("title"), URI.create(source).getHost(), "Podcast"), List.copyOf(items), artwork, skippedItems, resolve(source, feed.get("new-feed-url")));
         }
     }
 
@@ -231,7 +239,9 @@ public final class FeedParser {
         if (value.isBlank()) return 0;
         value = value.replaceFirst("\\s*\\([^()]*\\)\\s*$", "").trim();
         Map<String, String> zones = Map.ofEntries(Map.entry("UT", "+0000"), Map.entry("UTC", "+0000"),
-            Map.entry("GMT", "+0000"), Map.entry("EST", "-0500"), Map.entry("EDT", "-0400"),
+            Map.entry("GMT", "+0000"), Map.entry("Z", "+0000"),
+            Map.entry("CET", "+0100"), Map.entry("CEST", "+0200"), Map.entry("MET", "+0100"),
+            Map.entry("EET", "+0200"), Map.entry("EEST", "+0300"), Map.entry("BST", "+0100"), Map.entry("AEST", "+1000"), Map.entry("EST", "-0500"), Map.entry("EDT", "-0400"),
             Map.entry("CST", "-0600"), Map.entry("CDT", "-0500"), Map.entry("MST", "-0700"),
             Map.entry("MDT", "-0600"), Map.entry("PST", "-0800"), Map.entry("PDT", "-0700"));
         int lastSpace = value.lastIndexOf(' ');
@@ -239,6 +249,11 @@ public final class FeedParser {
         if (offset != null) value = value.substring(0, lastSpace + 1) + offset;
         try { return Instant.parse(value).toEpochMilli(); } catch (Exception ignored) {}
         try { return OffsetDateTime.parse(value).toInstant().toEpochMilli(); } catch (Exception ignored) {}
+        // Normalize publisher variants only after trying standard ISO dates unchanged.
+        value = value.replaceFirst("([+-][0-9]{2}):([0-9]{2})$", "$1$2");
+        value = value.replaceAll("(?i)(?<=\\s)sept(?=\\s)", "Sep")
+            .replaceAll("(?i)(?<=\\s)déc(?=\\s)", "déc.")
+            .replaceAll("(?i)(?<=\\s)(janv|févr|avr|juil|oct|nov)(?=\\s)", "$1.");
         // RFC 822 two-digit years: 70–99 = 1970–1999; 00–69 = 2000–2069.
         // Ignore the optional weekday for tolerant publisher/localised dates.
         String withoutWeekday = value.replaceFirst("^[^,0-9]+,\\s*", "");
@@ -256,9 +271,13 @@ public final class FeedParser {
                 DateTimeFormatter.ofPattern("d MMM yyyy HH:mm:ss Z", Locale.US))) {
             try { return ZonedDateTime.parse(value, f).toInstant().toEpochMilli(); } catch (Exception ignored) {}
         }
-        try { return LocalDateTime.parse(value).toInstant(ZoneOffset.UTC).toEpochMilli(); } catch (Exception ignored) {}
+        try { return LocalDateTime.parse(value.replaceFirst("^(\\d{4}-\\d{2}-\\d{2}) ", "$1T")).toInstant(ZoneOffset.UTC).toEpochMilli(); } catch (Exception ignored) {}
         try { return LocalDate.parse(value).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli(); } catch (Exception ignored) {}
         return 0; // Undated episodes stay stable and sort after dated ones.
+    }
+    private static Long positiveLength(String value) {
+        try { long length = Long.parseLong(value); return length > 0 ? length : null; }
+        catch (Exception ignored) { return null; }
     }
     private static long duration(String value) {
         try {

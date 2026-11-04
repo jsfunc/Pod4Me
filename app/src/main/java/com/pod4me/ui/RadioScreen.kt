@@ -207,8 +207,7 @@ fun LivePlayer(playback: PlaybackUi, model: AppModel) {
         verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Icon(painterResource(R.drawable.ic_live), contentDescription = null, modifier = Modifier.size(64.dp), tint = MaterialTheme.colorScheme.primary)
         Text(playback.radioName.orEmpty(), style = MaterialTheme.typography.headlineSmall)
-        Text(if (playback.buffering) "Buffering…" else if (!playback.playing) "Paused"
-            else if (playback.liveOffset <= 8000) "Live" else "${duration(behind)} behind live")
+        Text(if (seeking != null) "${duration(behind)} behind live" else radioStatus(playback))
         Slider(value = seeking ?: playback.position.toFloat().coerceIn(0f, playback.duration.toFloat().coerceAtLeast(1f)),
             modifier = Modifier.semantics { contentDescription = "Rewind buffered live radio" },
             onValueChange = { seeking = it }, valueRange = 0f..playback.duration.toFloat().coerceAtLeast(1f),
@@ -218,11 +217,12 @@ fun LivePlayer(playback: PlaybackUi, model: AppModel) {
         Text("Rewind starts when you tune in. Stop or change station to clear it.", style = MaterialTheme.typography.bodySmall)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedButton(enabled = playback.canSeek, onClick = { model.action { model.player.back() } }) { Text("−10s") }
-            Button(enabled = playback.connected, onClick = { model.action { model.player.toggle() } }) { Text(if (playback.playing) "Pause" else "Resume") }
+            Button(enabled = playback.connected, onClick = { model.action { model.player.toggle() } }) { Text(if (playback.playing) "Pause" else if (playback.ended) "Replay" else "Resume") }
             OutlinedButton(enabled = playback.canSeek, onClick = { model.action { model.player.forward() } }) { Text("+10s") }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Button(enabled = playback.canSeek, onClick = { model.action { model.player.goLive() } }) { Text("Back to live") }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            SleepTimerControl(playback, model)
+            Button(onClick = { model.action { model.player.goLive() } }) { Text("Back to live") }
             Button(onClick = { model.action { model.player.stop() } }) {
                 Icon(painterResource(R.drawable.ic_stop), contentDescription = null)
                 Spacer(Modifier.width(8.dp))
@@ -233,6 +233,11 @@ fun LivePlayer(playback: PlaybackUi, model: AppModel) {
 }
 
 internal fun radioStatus(playback: PlaybackUi): String = when {
+    playback.ended -> "Buffer finished · Replay or Back to live"
+    playback.radioNotice != null -> playback.radioNotice
+    playback.radioStatus == "PAUSE_LIMIT" -> "Capture stopped after 30 min paused · Back to live reconnects"
+    playback.radioStatus == "UNAVAILABLE" -> if (playback.radioHasAudio) "Station unavailable · Buffer kept · Back to live retries" else "Station unavailable · Back to live retries"
+    playback.radioStatus == "RECONNECTING" -> "Reconnecting…"
     playback.buffering -> "Buffering…"
     !playback.playing -> "Paused"
     playback.liveOffset <= 8000 -> "Live"

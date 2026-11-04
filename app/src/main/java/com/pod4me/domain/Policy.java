@@ -20,7 +20,7 @@ public final class Policy {
     }
 
     public static Long heardExpiry(Long previous, long heardAt) {
-        long limit = Math.addExact(heardAt, 7 * DAY);
+        long limit = Math.addExact(heardAt, 3 * DAY);
         return previous == null ? limit : Math.min(previous, limit);
     }
 

@@ -61,6 +61,21 @@ class RadioPreferencesTest {
         assertEquals(prefs.state.value, restored)
     }
 
+    @Test fun corruptRowDoesNotHideGoodStationsAndOriginalSurvivesEdits() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val saved = """[{"name":"Good","url":"https://example.com/live"},{"name":"Bad","url":"file:///bad"}]"""
+        val disk = app.getSharedPreferences("live_radios", 0)
+        disk.edit().putString("stations", saved).commit()
+        val messages = mutableListOf<String>()
+        val prefs = RadioPreferences(app) { messages.add(it) }
+        assertEquals(listOf("Good"), prefs.read().map { it.name })
+        prefs.read()
+        assertEquals(1, messages.size)
+        prefs.subscribe("New", "https://example.com/new")
+        assertEquals(saved, disk.getString("stations_recovery", null))
+        assertEquals(2, RadioPreferences(app).read().size)
+    }
+
     @Test fun invalidInputsDoNotChangeSubscriptions() = runBlocking {
         val prefs = RadioPreferences(RuntimeEnvironment.getApplication())
         val before = prefs.read()

@@ -20,6 +20,9 @@ import com.pod4me.data.PodcastDiscoveryClient
 import java.io.File
 import kotlin.math.roundToLong
 
+data class ImportPreview(val entries: List<SubscriptionFormat.Entry>, val already: Int, val invalid: Int, val duplicates: Int)
+data class SubscriptionSearch(val items: List<PodcastRecommendation> = emptyList(), val loading: Boolean = false, val message: String? = null)
+data class RefreshUi(val completed: Int = 0, val total: Int = 0, val running: Boolean = false, val failedIds: List<String> = emptyList())
 data class StorageUi(val usedGb: Long = 0, val freeGb: Long = 0)
 data class DiscoveryUi(val generation: Int = 0, val loading: Boolean = false,
     val items: List<PodcastRecommendation> = emptyList(), val message: String? = null)
@@ -27,6 +30,19 @@ class AppModel(application: Application) : AndroidViewModel(application) {
     val app = application as PodApplication
     val store = app.store
     val library = store.library
+    private val mutableDownloadConfirmation = MutableStateFlow<Episode?>(null)
+    val downloadConfirmation = mutableDownloadConfirmation.asStateFlow()
+    fun requestDownload(id: String) = action { downloadOrConfirm(id) }
+    private suspend fun downloadOrConfirm(id: String) {
+        try { store.download(id) }
+        catch (e: com.pod4me.data.DownloadConfirmationRequired) { mutableDownloadConfirmation.value = e.episode }
+    }
+    fun dismissDownloadConfirmation() { mutableDownloadConfirmation.value = null }
+    fun confirmDownload() {
+        val ep = mutableDownloadConfirmation.value ?: return
+        mutableDownloadConfirmation.value = null
+        action { store.download(ep.id, allowLargeMetered = true) }
+    }
     val radios = app.radios.state
     val player = PlayerClient(app)
     val error = app.error
@@ -39,6 +55,22 @@ class AppModel(application: Application) : AndroidViewModel(application) {
     private val mutableSuggestion = MutableStateFlow<Suggestion?>(null)
     val suggestion = mutableSuggestion.asStateFlow()
     private val discoveryClient = PodcastDiscoveryClient()
+    private val mutableSearch = MutableStateFlow(SubscriptionSearch())
+    val subscriptionSearch = mutableSearch.asStateFlow()
+    private val mutableImport = MutableStateFlow<ImportPreview?>(null)
+    val importPreview = mutableImport.asStateFlow()
+    private val mutableRefresh = MutableStateFlow(RefreshUi())
+    val refreshState = mutableRefresh.asStateFlow()
+    fun clearSearch() { mutableSearch.value = SubscriptionSearch() }
+    fun searchSubscriptions(term: String) = network {
+        mutableSearch.value = SubscriptionSearch(loading = true)
+        try {
+            val items = discoveryClient.search(term)
+            mutableSearch.value = SubscriptionSearch(items, message = if (items.isEmpty()) "No subscribable feeds found. Try another name or paste the show's RSS URL." else null)
+        } catch (e: CancellationException) { mutableSearch.value = SubscriptionSearch(); throw e }
+        catch (e: Exception) { mutableSearch.value = SubscriptionSearch(message = e.message ?: "Search failed") }
+    }
+    fun subscribeResult(item: PodcastRecommendation) = network { subscribeNow(item.feedUrl) }
     val discoveryMemory = app.discoveryPreferences.state
     private val mutableDiscovery = MutableStateFlow(DiscoveryUi())
     val discovery = mutableDiscovery.asStateFlow()
@@ -54,24 +86,30 @@ class AppModel(application: Application) : AndroidViewModel(application) {
         catch (e: SQLiteConstraintException) { app.report(IllegalArgumentException("The library changed while this action was being applied. Reopen the item and try again.")) }
         catch (e: Exception) { app.report(e) }
     } }
+    var needsForegroundMaintenance = true
     suspend fun onLaunch() {
-        try { store.initialize(); store.seedVideoSamples(); store.seedYouTubeChannel(); app.radios.read(); store.reconcileDownloads(); store.expireAtLaunch(); updateStorage() }
-        catch (e: Exception) { app.report(e) }
+        if (!needsForegroundMaintenance) return
+        try {
+            app.initializeOnce()
+            store.reconcileDownloads(); store.expireAtLaunch(); updateStorage()
+            needsForegroundMaintenance = false
+        } catch (e: Exception) { app.report(e) }
     }
     private suspend fun updateStorage() = withContext(Dispatchers.IO) {
         val directory = app.getExternalFilesDir(android.os.Environment.DIRECTORY_PODCASTS) ?: app.filesDir
         val bytes = directory.listFiles()?.sumOf(File::length) ?: 0L
         mutableStorage.value = StorageUi((bytes / 1e9).roundToLong(), (StatFs(directory.absolutePath).availableBytes / 1e9).roundToLong())
     }
-    fun refresh(feed: Feed? = null) = network {
-        val targets = (feed?.let(::listOf) ?: library.value.subscriptions).filter { it.subscribed && it.url.isNotBlank() && !it.isYouTube }
-        val failures = mutableListOf<String>()
-        for (target in targets) {
-            try { store.saveFeed(target.url, app.feeds.fetch(target.url), target.id) }
-            catch (e: CancellationException) { throw e }
-            catch (e: Exception) { store.feedError(target.id, e.message ?: "Refresh failed"); failures += target.name }
-        }
-        if (failures.isNotEmpty()) mutableNotice.value = "Refresh failed: ${failures.joinToString()}"
+    fun refresh(feed: Feed? = null) = refreshFeeds(feed?.let(::listOf) ?: library.value.subscriptions)
+    fun retryRefresh() = refreshFeeds(library.value.subscriptions.filter { it.id in mutableRefresh.value.failedIds })
+    fun dismissRefreshFailures() { mutableRefresh.value = mutableRefresh.value.copy(failedIds = emptyList()) }
+    private fun refreshFeeds(targets: List<Feed>) = network {
+        val refresher = com.pod4me.data.FeedRefresher(app.feeds::refresh,
+            { feed, response -> store.applyRefresh(feed, response) }, { feed, message -> store.feedError(feed.id, message) })
+        try {
+            val failed = refresher.refresh(targets) { done, total -> mutableRefresh.value = RefreshUi(done, total, true) }
+            mutableRefresh.value = mutableRefresh.value.copy(running = false, failedIds = failed.map { it.id })
+        } finally { mutableRefresh.value = mutableRefresh.value.copy(running = false) }
     }
     fun subscribe(url: String) = network { subscribeNow(url); mutableNotice.value = "Subscription added" }
     fun discover() = network {
@@ -95,36 +133,47 @@ class AppModel(application: Application) : AndroidViewModel(application) {
     }
     private suspend fun subscribeNow(url: String, title: String? = null): String {
         if (YouTubeChannels.isYouTube(url)) return store.subscribeYouTube(url, title)
-        val normalized = FeedParser.httpUrl(url.trim())
-        return store.saveFeed(normalized, app.feeds.fetch(normalized))
+        val normalized = discoveryClient.resolveAppleUrl(url.trim()) ?: FeedParser.httpUrl(url.trim())
+        val known = library.value.feeds.any { it.url == normalized }
+        val id = store.saveFeed(normalized, app.feeds.fetch(normalized))
+        if (!known && !title.isNullOrBlank()) {
+            library.value.feeds.firstOrNull { it.id == id }?.let { store.editFeed(id, title, it.expiryDays, it.defaults) }
+        }
+        return id
     }
     fun importFeeds(uri: Uri) = network {
-        val text = withContext(Dispatchers.IO) {
-            requireNotNull(app.contentResolver.openInputStream(uri)).use {
-                val bytes = it.readNBytes(1_048_577)
-                require(bytes.size <= 1_048_576) { "Feed list must be smaller than 1 MB" }
-                bytes.toString(Charsets.UTF_8).removePrefix("\uFEFF")
-            }
+        val entries = withContext(Dispatchers.IO) {
+            requireNotNull(app.contentResolver.openInputStream(uri)).use { SubscriptionFormat.parse(it.readNBytes(SubscriptionFormat.MAX_BYTES + 1)) }
         }
-        val urls = FeedListFormat.urls(text)
-        require(urls.size <= 1000) { "Import at most 1,000 feeds at a time" }
-        var added = 0; var skipped = 0
-        val failed = mutableListOf<String>()
-        for (url in urls) {
-            try {
-                val normalized = if (YouTubeChannels.isYouTube(url)) YouTubeChannels.normalize(url) else FeedParser.httpUrl(url)
-                if (library.value.subscriptions.any { it.url == normalized }) { skipped++; continue }
-                subscribeNow(normalized, YouTubeChannels.importedName(text, url)); added++
-            }
-            catch (e: CancellationException) { throw e }
-            catch (e: Exception) { failed += "$url: ${e.message}" }
-        }
-        mutableNotice.value = "$added added, $skipped already subscribed" + if (failed.isEmpty()) "" else ". Failed:\n${failed.joinToString("\n")}"
+        mutableImport.value = previewImport(entries, library.value.subscriptions.map { it.url }.toSet())
     }
-    fun exportFeeds(uri: Uri) = action {
-        val lines = library.value.subscriptions.map { FeedListFormat.line(it.url, it.name) }
-        withContext(Dispatchers.IO) { requireNotNull(app.contentResolver.openOutputStream(uri, "wt")).bufferedWriter().use { it.write(lines.joinToString("\n", postfix = if (lines.isEmpty()) "" else "\n")) } }
+    fun dismissImport() { mutableImport.value = null }
+    fun confirmImport() = network {
+        val preview = mutableImport.value ?: return@network
+        mutableImport.value = null
+        var added = 0; var skipped = preview.already
+        val failed = mutableListOf<String>()
+        for (entry in preview.entries) {
+            try {
+                if (library.value.subscriptions.any { it.url == entry.url() }) { skipped++; continue }
+                subscribeNow(entry.url(), entry.title()); added++
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { failed += "${entry.url()}: ${e.message}" }
+        }
+        mutableNotice.value = "$added added, $skipped already subscribed, ${preview.invalid} invalid" +
+            if (failed.isEmpty()) "" else ". Failed:\n${failed.joinToString("\n")}"
+    }
+    fun exportFeeds(uri: Uri, opml: Boolean = false) = action {
+        val feeds = library.value.subscriptions.filter { !opml || !it.isYouTube }
+        val text = if (opml) SubscriptionFormat.opml(feeds.map { SubscriptionFormat.Entry(it.url, it.name) })
+            else feeds.joinToString("\n", postfix = if (feeds.isEmpty()) "" else "\n") { FeedListFormat.line(it.url, it.name) }
+        withContext(Dispatchers.IO) { requireNotNull(app.contentResolver.openOutputStream(uri, "wt")).bufferedWriter().use { it.write(text) } }
         mutableNotice.value = "Feed list exported"
+    }
+    fun deleteListDownloads(filter: String, ids: Set<String>, alreadySkipped: Int = 0) = action {
+        val result = store.deleteListDownloads(filter, ids)
+        mutableNotice.value = "${result.deleted} downloads deleted, ${result.skipped + alreadySkipped} skipped" +
+            if (result.failed > 0) ", ${result.failed} failed (see episode errors)" else ""
     }
     fun exportLibrary(uri: Uri) = network {
         withContext(Dispatchers.IO) {
@@ -157,10 +206,10 @@ class AppModel(application: Application) : AndroidViewModel(application) {
         else {
             if (subscribeFeed && suggestion.feedUrl != null) subscribeNow(suggestion.feedUrl)
             val id = store.addSharedAudio(suggestion.url, suggestion.title)
-            store.download(id)
+            downloadOrConfirm(id)
         }
         mutableSuggestion.value = null
-        mutableNotice.value = if (kind == "feed") "Feed added" else "Episode download started"
+        mutableNotice.value = if (kind == "feed") "Feed added" else if (mutableDownloadConfirmation.value == null) "Episode download started" else null
     }
     fun clearNotice() { mutableNotice.value = null }
     private fun network(block: suspend () -> Unit) {
@@ -170,6 +219,22 @@ class AppModel(application: Application) : AndroidViewModel(application) {
         }
         mutableBusy.value = true
         action { try { block() } finally { mutableBusy.value = false } }
+    }
+    companion object {
+        internal fun previewImport(entries: List<SubscriptionFormat.Entry>, subscribed: Set<String>): ImportPreview {
+            val pending = linkedMapOf<String, SubscriptionFormat.Entry>()
+            val seen = mutableSetOf<String>()
+            var already = 0; var invalid = 0; var duplicates = 0
+            for (entry in entries) {
+                try {
+                    val url = if (YouTubeChannels.isYouTube(entry.url())) YouTubeChannels.normalize(entry.url()) else FeedParser.httpUrl(entry.url())
+                    if (!seen.add(url)) duplicates++
+                    else if (url in subscribed) already++
+                    else pending[url] = SubscriptionFormat.Entry(url, entry.title())
+                } catch (_: Exception) { invalid++ }
+            }
+            return ImportPreview(pending.values.toList(), already, invalid, duplicates)
+        }
     }
     override fun onCleared() { player.disconnect(); super.onCleared() }
 }

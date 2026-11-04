@@ -56,6 +56,8 @@ import java.util.Locale
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
+private data class DownloadDeletion(val filter: String, val name: String, val ids: Set<String>, val eligible: Int, val skipped: Int)
+
 @Composable
 fun PodApp(model: AppModel) {
     val positions = rememberSaveable(saver = ScrollPositions.Saver) { ScrollPositions() }
@@ -66,6 +68,9 @@ fun PodApp(model: AppModel) {
     val busy by model.busy.collectAsStateWithLifecycle()
     val error by model.error.collectAsStateWithLifecycle()
     val notice by model.notice.collectAsStateWithLifecycle()
+    val downloadConfirmation by model.downloadConfirmation.collectAsStateWithLifecycle()
+    val refresh by model.refreshState.collectAsStateWithLifecycle()
+    val importPreview by model.importPreview.collectAsStateWithLifecycle()
     val suggestion by model.suggestion.collectAsStateWithLifecycle()
     var page by rememberSaveable { mutableStateOf("Library") }
     var filter by rememberSaveable { mutableStateOf("unheard") }
@@ -75,24 +80,29 @@ fun PodApp(model: AppModel) {
     var showAddFeed by remember { mutableStateOf(false) }
     var editingFeed by remember { mutableStateOf<Feed?>(null) }
     var unsubscribingFeed by remember { mutableStateOf<Feed?>(null) }
+    var fullscreen by rememberSaveable { mutableStateOf(false) }
+    var showExport by remember { mutableStateOf(false) }
+    var bulkDelete by remember { mutableStateOf<DownloadDeletion?>(null) }
     var showLists by remember { mutableStateOf(false) }
     var showDiscovery by rememberSaveable { mutableStateOf(false) }
     var showSharedMessage by rememberSaveable { mutableStateOf(false) }
     var restoreUri by remember { mutableStateOf<android.net.Uri?>(null) }
     val context = LocalContext.current
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { it?.let(model::importFeeds) }
-    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { it?.let(model::exportFeeds) }
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { it?.let { uri -> model.exportFeeds(uri) } }
+    val opmlLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/x-opml")) { it?.let { uri -> model.exportFeeds(uri, opml = true) } }
     val backupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { it?.let(model::exportLibrary) }
     val restoreLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { restoreUri = it }
     val colors = if (isSystemInDarkTheme()) PodDarkColors else PodLightColors
     MaterialTheme(colorScheme = colors) {
-        Scaffold(
+        if (fullscreen) FullscreenVideo(model) { fullscreen = false }
+        else Scaffold(
             topBar = {
                 Column {
                     TopAppBar(title = {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("Pod4Me", fontWeight = FontWeight.Bold, maxLines = 1)
-                            Text("used: ${storage.usedGb} - free: ${storage.freeGb} GB",
+                            Text(if (refresh.running) "Refreshing ${refresh.completed}/${refresh.total}" else "used: ${storage.usedGb} - free: ${storage.freeGb} GB",
                                 modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
@@ -120,9 +130,9 @@ fun PodApp(model: AppModel) {
                 if (!library.ready) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
                 } else when (page) {
-                    "Feeds" -> FeedScreen(library, busy, positions, onAdd = { showAddFeed = true },
-                        onImport = { importLauncher.launch(arrayOf("text/*", "application/octet-stream")) },
-                        onExport = { exportLauncher.launch("pod4me-feeds.txt") },
+                    "Feeds" -> FeedScreen(library, busy, positions, onAdd = { model.clearSearch(); showAddFeed = true },
+                        onImport = { importLauncher.launch(arrayOf("text/*", "application/xml", "application/opml+xml", "application/octet-stream")) },
+                        onExport = { showExport = true },
                         onDiscover = { showDiscovery = true; model.discover() },
                         onOpenShared = { showSharedMessage = true },
                         onBackup = { backupLauncher.launch("pod4me-library-v1.json") },
@@ -139,6 +149,17 @@ fun PodApp(model: AppModel) {
                         if (downloaded) {
                             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text("Downloads", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                                ActionIcon(R.drawable.ic_delete, "Delete all downloads in this list", enabled = library.episodes.any { it.matchesDownloadFilter(filter) }, onClick = {
+                                    val episodes = library.episodes.filter { it.matchesDownloadFilter(filter) }
+                                    val protected = episodes.count { it.protected || it.id == model.store.activeEpisode.get() }
+                                    val name = when {
+                                        filter == "all" -> "All downloads"
+                                        filter == "starred" -> "Starred"
+                                        filter.startsWith("feed:") -> library.feedName(filter.removePrefix("feed:"))
+                                        else -> library.lists.firstOrNull { it.id == filter }?.name ?: "Selected list"
+                                    }
+                                    bulkDelete = DownloadDeletion(filter, name, episodes.filterNot { it.protected || it.id == model.store.activeEpisode.get() }.mapTo(mutableSetOf()) { it.id }, episodes.size - protected, protected)
+                                })
                                 TextButton(onClick = { showLists = true }) { Text("Manage lists") }
                             }
                             Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -213,7 +234,7 @@ fun PodApp(model: AppModel) {
                                         }
                                         if (ep.isVideo) page = "Player"
                                     },
-                                    onDownload = { model.action { model.store.download(ep.id) } },
+                                    onDownload = { model.requestDownload(ep.id) },
                                     onCancel = { model.action { model.store.cancelDownload(ep.id) } },
                                     onDelete = { model.action { model.store.deleteAudio(ep.id) } },
                                     onQueue = { model.action { model.store.enqueue(ep.id) } }, compact = !downloaded,
@@ -223,7 +244,7 @@ fun PodApp(model: AppModel) {
                     }
                     "Queue" -> QueueScreen(library, model, positions, onDetails = { selectedId = it })
                     "Live" -> RadioScreen(model, positions)
-                    "Player" -> PlayerScreen(library, model, positions, onDetails = { selectedId = it })
+                    "Player" -> PlayerScreen(library, model, positions, onDetails = { selectedId = it }, onFullscreen = { fullscreen = true })
                 }
             }
         }
@@ -232,8 +253,27 @@ fun PodApp(model: AppModel) {
             text = { Text("This merges subscriptions, lists, ratings, progress, bookmarks and queue into this library. Backup values replace matching feed settings, ratings and progress; memberships are combined. Existing audio is kept. Missing audio is not downloaded automatically. Stop playback before restoring.") },
             confirmButton = { TextButton(enabled = !busy, onClick = { model.restoreLibrary(uri); restoreUri = null }) { Text("Restore") } },
             dismissButton = { TextButton(onClick = { restoreUri = null }) { Text("Cancel") } }) }
-        if (showAddFeed) TextInputDialog("Add subscription", "RSS feed or YouTube channel URL", "", "Subscribe", busy,
-            onDismiss = { showAddFeed = false }, onSave = { model.subscribe(it); showAddFeed = false })
+        if (showAddFeed) SubscriptionDialog(model) { showAddFeed = false }
+        if (showExport) AlertDialog(onDismissRequest = { showExport = false }, title = { Text("Export subscriptions") },
+            text = { Text("Text includes podcast feeds and YouTube channels. OPML exports podcast feeds for other podcast apps.") },
+            confirmButton = { TextButton(onClick = { showExport = false; exportLauncher.launch("pod4me-feeds.txt") }) { Text("Text") } },
+            dismissButton = { Row {
+                TextButton(onClick = { showExport = false; opmlLauncher.launch("pod4me-feeds.opml") }) { Text("OPML") }
+                TextButton(onClick = { showExport = false }) { Text("Cancel") }
+            } })
+        importPreview?.let { preview -> AlertDialog(onDismissRequest = model::dismissImport, title = { Text("Import subscriptions?") },
+            text = { Text("${preview.entries.size} new, ${preview.already} already subscribed, ${preview.invalid} invalid, ${preview.duplicates} duplicates. Existing subscriptions keep their names and settings. No episodes will be downloaded.") },
+            confirmButton = { TextButton(enabled = !busy && preview.entries.isNotEmpty(), onClick = model::confirmImport) { Text("Import") } },
+            dismissButton = { TextButton(onClick = model::dismissImport) { Text("Cancel") } }) }
+        if (!refresh.running && refresh.failedIds.isNotEmpty()) AlertDialog(onDismissRequest = model::dismissRefreshFailures,
+            title = { Text("Some feeds could not refresh") }, text = {
+                Text(refresh.failedIds.mapNotNull { id -> library.feeds.firstOrNull { it.id == id } }.joinToString("\n") { "${it.name}: ${it.error ?: "Refresh failed"}" }, Modifier.verticalScroll(rememberScrollState()))
+            }, confirmButton = { TextButton(enabled = !busy, onClick = model::retryRefresh) { Text("Retry failed feeds") } },
+            dismissButton = { TextButton(onClick = model::dismissRefreshFailures) { Text("Close") } })
+        bulkDelete?.let { request -> AlertDialog(onDismissRequest = { bulkDelete = null }, title = { Text("Delete downloads from ${request.name}?") },
+            text = { Text("Delete ${request.eligible} downloaded files? ${request.skipped} protected/current items will be skipped. The list, ratings, bookmarks and episode information are kept. These files will also become unavailable in other lists and be removed from Queue.") },
+            confirmButton = { TextButton(enabled = request.eligible > 0, onClick = { model.deleteListDownloads(request.filter, request.ids, request.skipped); bulkDelete = null }) { Text("Delete downloads") } },
+            dismissButton = { TextButton(onClick = { bulkDelete = null }) { Text("Cancel") } }) }
         editingFeed?.let { feed -> if (feed.isYouTube) TextInputDialog("Rename YouTube channel", "Channel name", feed.name, "Save", busy,
             onDismiss = { editingFeed = null }, onSave = { name -> model.action {
                 model.store.editFeed(feed.id, name, feed.expiryDays, feed.defaults); editingFeed = null
@@ -262,6 +302,11 @@ fun PodApp(model: AppModel) {
         suggestion?.let { incoming -> SuggestionDialog(incoming, busy, onDismiss = model::dismissSuggestion) { kind, subscribe -> model.acceptSuggestion(incoming, kind, subscribe) } }
         error?.let { message -> AlertDialog(onDismissRequest = model.app::clearError, title = { Text("Could not complete action") }, text = { Text(message) },
             confirmButton = { TextButton(onClick = model.app::clearError) { Text("OK") } }) }
+        downloadConfirmation?.let { ep -> AlertDialog(onDismissRequest = model::dismissDownloadConfirmation,
+            title = { Text("Download on a metered connection?") },
+            text = { Text("${ep.title}\n\nThe publisher reports ${sizeLabel(ep.byteSize).removePrefix(" · ")}. This exceeds 200 MB and may use mobile data. The actual size may differ.") },
+            confirmButton = { TextButton(onClick = model::confirmDownload) { Text("Download") } },
+            dismissButton = { TextButton(onClick = model::dismissDownloadConfirmation) { Text("Cancel") } }) }
         notice?.let { message -> AlertDialog(onDismissRequest = model::clearNotice, title = { Text("Pod4Me") }, text = { Text(message, Modifier.verticalScroll(rememberScrollState())) },
             confirmButton = { TextButton(onClick = model::clearNotice) { Text("OK") } }) }
     }
@@ -490,7 +535,7 @@ private fun EpisodeCard(ep: Episode, feed: String, current: Boolean, onDetails: 
             }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("${date(ep.published)} · ${if (ep.heard) "Heard" else "Unheard"}" +
+                    Text(date(ep.published) + (if (ep.isDownloaded) " · ${if (ep.heard) "Heard" else "Unheard"}" else "") +
                         (if (ep.stars > 0) " · ${"★".repeat(ep.stars)}" else ""), style = MaterialTheme.typography.bodySmall)
                     if (ep.isDownloaded) Text("${(ep.progress * 100).toInt()}% · ${durationLabel(ep.duration)}" + if (ep.protected) " · 4ever" else "",
                         style = MaterialTheme.typography.bodySmall)
@@ -558,15 +603,15 @@ private fun CompactEpisodeCard(ep: Episode, feed: String, current: Boolean, artw
                         }
                     }
                     val minutes = durationMinutes(ep.duration)
-                    Text((if (ep.isVideo) "Video · " else "") + durationLabel(ep.duration),
+                    Text((if (ep.isVideo) "Video · " else "") + durationLabel(ep.duration) + sizeLabel(ep.byteSize),
                         style = MaterialTheme.typography.labelSmall, maxLines = 1,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.semantics {
-                            contentDescription = minutes?.let { "Duration: $it minutes" } ?: "Duration unknown"
+                            contentDescription = (minutes?.let { "Duration: $it minutes" } ?: "Duration unknown") + sizeLabel(ep.byteSize)
                         })
                 }
             }
-            Text("${date(ep.published)} · ${if (ep.heard) "Heard" else "Unheard"}" +
+            Text(date(ep.published) + (if (ep.isDownloaded) " · ${if (ep.heard) "Heard" else "Unheard"}" else "") +
                 (if (current) " · Current" else "") + (if (ep.stars > 0) " · ${"★".repeat(ep.stars)}" else ""),
                 style = MaterialTheme.typography.bodySmall)
             if (ep.isDownloaded) Text("${(ep.progress * 100).toInt()}% played · ${if (ep.protected) "4ever" else ep.expiry?.let { "Expires ${date(it)}" } ?: "No expiry"}",
@@ -605,7 +650,7 @@ private fun QueueScreen(library: Library, model: AppModel, positions: ScrollPosi
                         if (ep.isDownloaded) ActionIcon(R.drawable.ic_play, "Play queued episode",
                             onClick = { model.action { model.player.play(ep.id, library.queue) } })
                         else ActionIcon(R.drawable.ic_download, "Download queued episode", enabled = ep.downloadId == null,
-                            onClick = { model.action { model.store.download(id) } })
+                            onClick = { model.requestDownload(id) })
                     }
                 }
             }
@@ -614,7 +659,7 @@ private fun QueueScreen(library: Library, model: AppModel, positions: ScrollPosi
 }
 
 @Composable
-private fun PlayerScreen(library: Library, model: AppModel, positions: ScrollPositions, onDetails: (String) -> Unit) {
+private fun PlayerScreen(library: Library, model: AppModel, positions: ScrollPositions, onDetails: (String) -> Unit, onFullscreen: () -> Unit) {
     val playback by model.player.state.collectAsStateWithLifecycle()
     if (playback.radioName != null) { LivePlayer(playback, model); return }
     val ep = library.episode(playback.id)
@@ -634,9 +679,10 @@ private fun PlayerScreen(library: Library, model: AppModel, positions: ScrollPos
             VideoSurface(model.player.videoPlayer, playback.videoAspectRatio, playback.playing)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(if (ep.isDownloaded) "Video · Downloaded" else "Video · Streaming", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
-                if (!ep.isDownloaded) TextButton(onClick = { model.action {
-                    if (ep.downloadId != null) model.store.cancelDownload(ep.id) else model.store.download(ep.id)
-                } }) { Text(if (ep.downloadId != null) "Cancel download" else "Download") }
+                ActionIcon(R.drawable.ic_fullscreen, "Fullscreen video", onClick = onFullscreen)
+                if (!ep.isDownloaded) TextButton(onClick = {
+                    if (ep.downloadId != null) model.action { model.store.cancelDownload(ep.id) } else model.requestDownload(ep.id)
+                }) { Text(if (ep.downloadId != null) "Cancel download" else "Download") }
             }
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -667,6 +713,7 @@ private fun PlayerScreen(library: Library, model: AppModel, positions: ScrollPos
         Slider(value = speed, onValueChange = { speed = it }, valueRange = 1f..3f, steps = 19,
             onValueChangeFinished = { model.action { model.player.speed(speed) } })
         FlowRow {
+            SleepTimerControl(playback, model)
             TextButton(onClick = { onDetails(ep.id) }) { Text("Episode details") }
             TextButton(onClick = { addBookmark = playback.position }) { Text("Add bookmark") }
             TextButton(onClick = { model.action { model.player.stop() } }) { Text("Stop") }
@@ -843,7 +890,7 @@ private fun FeedEditDialog(feed: Feed, lists: List<TrackList>, positions: Scroll
             }
             if (!forever) OutlinedTextField(value = days, onValueChange = { days = it }, label = { Text("Expiry in days (1–36500)") },
                 modifier = Modifier.fillMaxWidth(), singleLine = true, isError = !validDays)
-            Text("Applies to future downloads. Heard episodes expire within seven days; 4ever protects them.", style = MaterialTheme.typography.bodySmall)
+            Text("Applies to future downloads. Heard episodes expire within three days; 4ever protects them.", style = MaterialTheme.typography.bodySmall)
             Text("Default lists", fontWeight = FontWeight.Bold)
             Text("New episodes automatically appear in Unheard and this feed’s view.", style = MaterialTheme.typography.bodySmall)
             lists.filter { it.id !in setOf("heard", "unheard", "4ever") }.forEach { list ->
@@ -948,6 +995,10 @@ private fun time(ms: Long): String {
     else String.format(Locale.US, "%d:%02d", seconds / 60, seconds % 60)
 }
 private fun durationMinutes(ms: Long): Long? = ms.takeIf { it > 0 }?.let { (it / 60_000.0).roundToLong().coerceAtLeast(1) }
+private fun sizeLabel(bytes: Long?): String = bytes?.let {
+    if (it >= 1_000_000_000) " · %.1f GB".format(Locale.ROOT, it / 1e9)
+    else " · ${kotlin.math.ceil(it / 1e6).toLong()} MB"
+} ?: ""
 private fun durationLabel(ms: Long): String = durationMinutes(ms)?.let { "${it}min" } ?: "Length unknown"
 private val fullDate = DateTimeFormatter.ofPattern("d MMM yyyy")
 private fun date(ms: Long) = if (ms <= 0) "Date unknown" else

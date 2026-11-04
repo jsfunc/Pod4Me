@@ -20,6 +20,128 @@ import java.io.File
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = Application::class)
 class LibraryStoreTest {
+    @Test fun refreshValidatorsAndMovesPreserveHistoryAndRejectConflicts() = runBlocking {
+        val original = store.library.value.subscriptions.single()
+        store.editFeed(original.id, "My name", 8, emptySet())
+        store.progress(episode.id, 1234, 10000)
+        store.feedError(original.id, "Old error")
+        store.applyRefresh(original, com.pod4me.data.FeedResponse(null, "v1", "date"), 100)
+        val cached = store.library.value.subscriptions.single()
+        assertEquals("v1", cached.etag); assertEquals(100L, cached.lastRefreshed); assertNull(cached.error)
+        assertFalse(store.library.value.episode(episode.id)!!.newInLastRefresh)
+        store.applyRefresh(cached, com.pod4me.data.FeedResponse(FeedParser.Feed("Publisher rename", emptyList()), "v2", null, "https://example.com/moved"), 200)
+        val moved = store.library.value.subscriptions.single()
+        assertEquals("https://example.com/moved", moved.url); assertEquals("My name", moved.name)
+        assertEquals(8, moved.expiryDays); assertEquals(1234L, store.library.value.episode(episode.id)!!.position)
+        store.saveFeed("https://example.com/conflict", FeedParser.Feed("Other", emptyList()))
+        try { store.applyRefresh(moved, com.pod4me.data.FeedResponse(null, "bad", null, "https://example.com/conflict")); fail("Conflict required") }
+        catch (_: IllegalStateException) { }
+        assertEquals(moved, store.library.value.feeds.first { it.id == original.id })
+        store.unsubscribe(original.id)
+        store.applyRefresh(moved, com.pod4me.data.FeedResponse(null, "later", null))
+        assertFalse(store.library.value.feeds.first { it.id == original.id }.subscribed)
+    }
+
+    @Test fun successfulRedownloadResetsHeardAndProgressButCancellationAndFailureDoNot() = runBlocking {
+        store.progress(episode.id, 9800, 10000)
+        store.rate(episode.id, 4); store.bookmark(episode.id, 1000, "Keep")
+        store.deleteAudio(episode.id)
+        val manager = RuntimeEnvironment.getApplication().getSystemService(DownloadManager::class.java)
+        store.download(episode.id); store.cancelDownload(episode.id)
+        assertTrue(store.library.value.episode(episode.id)!!.heard)
+        assertEquals(9800L, store.library.value.episode(episode.id)!!.position)
+        store.download(episode.id)
+        shadowOf(shadowOf(manager).getRequest(store.library.value.episode(episode.id)!!.downloadId!!)).setStatus(DownloadManager.STATUS_FAILED)
+        store.reconcileDownloads()
+        assertTrue(store.library.value.episode(episode.id)!!.heard)
+        val epoch = store.progressEpoch(episode.id)
+        store.download(episode.id)
+        shadowOf(shadowOf(manager).getRequest(store.library.value.episode(episode.id)!!.downloadId!!)).setStatus(DownloadManager.STATUS_SUCCESSFUL)
+        file.writeBytes(byteArrayOf(1, 2, 3))
+        store.reconcileDownloads()
+        store.progress(episode.id, 9800, 10000, epoch)
+        val downloaded = store.library.value.episode(episode.id)!!
+        assertTrue(downloaded.isDownloaded); assertFalse(downloaded.heard); assertEquals(0L, downloaded.position)
+        assertEquals(4, downloaded.stars); assertEquals(1, store.library.value.bookmarks.size)
+    }
+
+    @Test fun bulkDeletionRechecksProtectionMembershipAndConfirmationBoundary() = runBlocking {
+        store.progress(episode.id, 9800, 10000)
+        val confirmed = setOf(episode.id)
+        store.membership(episode.id, "4ever", true)
+        assertEquals(1, store.deleteListDownloads("heard", confirmed).skipped)
+        store.membership(episode.id, "4ever", false)
+        store.activate(episode.id)
+        assertEquals(1, store.deleteListDownloads("heard", confirmed).skipped)
+        store.activeEpisode.set(null)
+        store.membership(episode.id, "unheard", true)
+        assertEquals(1, store.deleteListDownloads("heard", confirmed).skipped)
+        assertEquals(0, store.deleteListDownloads("all", emptySet()).deleted)
+        store.membership(episode.id, "heard", true)
+        store.bookmark(episode.id, 1, "Keep")
+        store.enqueue(episode.id)
+        assertEquals(1, store.deleteListDownloads("heard", confirmed).deleted)
+        assertFalse(file.exists()); assertTrue(store.library.value.queue.isEmpty())
+        assertTrue(store.library.value.episode(episode.id)!!.heard); assertEquals(1, store.library.value.bookmarks.size)
+        assertFalse(store.library.value.episode(episode.id)!!.matchesDownloadFilter("heard"))
+    }
+
+    @Test fun streamedEpisodesNeverBecomeHeardAndPlaybackErrorClearIsSpecific() = runBlocking {
+        store.deleteAudio(episode.id)
+        store.progress(episode.id, 9999, 10000)
+        try { store.membership(episode.id, "heard", true); fail("Undownloaded status must be rejected") } catch (_: IllegalArgumentException) { }
+        assertFalse(store.library.value.episode(episode.id)!!.heard)
+        store.playbackError(episode.id, "This download could not be played. Delete it and download it again.")
+        store.clearPlaybackError(episode.id)
+        assertNull(store.library.value.episode(episode.id)!!.error)
+        store.playbackError(episode.id, "Other download failure")
+        store.clearPlaybackError(episode.id)
+        assertEquals("Other download failure", store.library.value.episode(episode.id)!!.error)
+    }
+
+    @Test fun largeDownloadsRequireMeteredConsentAndSizesSurviveRefresh() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val connectivity = context.getSystemService(android.net.ConnectivityManager::class.java)
+        shadowOf(connectivity).setActiveNetworkInfo(org.robolectric.shadows.ShadowNetworkInfo.newInstance(
+            android.net.NetworkInfo.DetailedState.CONNECTED, android.net.ConnectivityManager.TYPE_MOBILE, 0, true, true))
+        val feed = store.saveFeed("https://example.com/large", FeedParser.Feed("Large", listOf(
+            FeedParser.Item("large", "Large", "https://example.com/large.mp4", "", 1, 10000, true, 3_010_290_787L),
+            FeedParser.Item("boundary", "Boundary", "https://example.com/boundary.mp4", "", 1, 10000, true, 200_000_000L))))
+        val ep = store.library.value.episodes.single { it.feedId == feed && it.title == "Large" }
+        try { store.download(ep.id); fail("Metered consent required") }
+        catch (e: com.pod4me.data.DownloadConfirmationRequired) { assertEquals(ep.id, e.episode.id) }
+        assertNull(store.library.value.episode(ep.id)!!.downloadId)
+        store.download(ep.id, allowLargeMetered = true)
+        assertNotNull(store.library.value.episode(ep.id)!!.downloadId)
+        val boundary = store.library.value.episodes.single { it.feedId == feed && it.title == "Boundary" }
+        store.download(boundary.id)
+        assertNotNull(store.library.value.episode(boundary.id)!!.downloadId)
+        store.saveFeed("https://example.com/large", FeedParser.Feed("Large", listOf(
+            FeedParser.Item("large", "Large", ep.audioUrl, "", 1, 10000, true, 400_000_000L))), feed)
+        assertEquals(400_000_000L, store.library.value.episode(ep.id)!!.byteSize)
+    }
+
+    @Test fun upgradeBackfillsSampleSizesWithoutResubscribingOrChangingHistory() = runBlocking {
+        store.seedVideoSamples()
+        val sample = store.library.value.episodes.first { (it.byteSize ?: 0) > 200_000_000 }
+        store.progress(sample.id, 1234, 10000)
+        store.unsubscribe(sample.feedId)
+        LibraryDatabase(RuntimeEnvironment.getApplication()).use {
+            it.writableDatabase.execSQL("UPDATE episodes SET byte_size=NULL WHERE id=?", arrayOf(sample.id))
+        }
+        store.initialize()
+        store.seedVideoSamples()
+        assertEquals(sample.byteSize, store.library.value.episode(sample.id)!!.byteSize)
+        assertEquals(1234L, store.library.value.episode(sample.id)!!.position)
+        assertFalse(store.library.value.feeds.single { it.id == sample.feedId }.subscribed)
+    }
+
+    @Test fun unchangedInitializationDoesNotInvalidateCatalogue() = runBlocking {
+        val before = store.library.value
+        store.initialize()
+        assertEquals(before, store.library.value)
+    }
+
     @Test fun youtubeSubscriptionsRoundTripAndDoNotCreateEpisodesOrReturnAfterUnsubscribe() = runBlocking {
         val before = store.library.value.episodes.size
         store.seedYouTubeChannel()

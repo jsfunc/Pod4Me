@@ -1,10 +1,10 @@
-CREATE TABLE feeds(id TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, name TEXT NOT NULL, expiry_days INTEGER, error TEXT, artwork_url TEXT, subscribed INTEGER NOT NULL DEFAULT 1 CHECK(subscribed IN (0,1)));
+CREATE TABLE feeds(id TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, name TEXT NOT NULL, expiry_days INTEGER, error TEXT, artwork_url TEXT, subscribed INTEGER NOT NULL DEFAULT 1 CHECK(subscribed IN (0,1)), etag TEXT, last_modified TEXT, last_refreshed INTEGER);
 CREATE TABLE lists(id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, system INTEGER NOT NULL DEFAULT 0);
 INSERT INTO lists VALUES('unheard','Unheard',1);
 INSERT INTO lists VALUES('heard','Heard',1);
 INSERT INTO lists VALUES('4ever','4ever',1);
 CREATE TABLE feed_defaults(feed_id TEXT NOT NULL REFERENCES feeds(id) ON DELETE CASCADE, list_id TEXT NOT NULL REFERENCES lists(id) ON DELETE CASCADE, PRIMARY KEY(feed_id,list_id));
-CREATE TABLE episodes(id TEXT PRIMARY KEY, feed_id TEXT NOT NULL REFERENCES feeds(id), guid TEXT NOT NULL, title TEXT NOT NULL, audio_url TEXT NOT NULL, description TEXT NOT NULL, published INTEGER NOT NULL, duration INTEGER NOT NULL DEFAULT 0, downloaded INTEGER, path TEXT, expiry INTEGER, stars INTEGER NOT NULL DEFAULT 0 CHECK(stars BETWEEN 0 AND 5), position INTEGER NOT NULL DEFAULT 0, heard INTEGER NOT NULL DEFAULT 0, download_id INTEGER, manager_id INTEGER, new_in_last_refresh INTEGER NOT NULL DEFAULT 0 CHECK(new_in_last_refresh IN (0,1)), error TEXT, is_video INTEGER NOT NULL DEFAULT 0 CHECK(is_video IN (0,1)), UNIQUE(feed_id,guid));
+CREATE TABLE episodes(id TEXT PRIMARY KEY, feed_id TEXT NOT NULL REFERENCES feeds(id), guid TEXT NOT NULL, title TEXT NOT NULL, audio_url TEXT NOT NULL, description TEXT NOT NULL, published INTEGER NOT NULL, duration INTEGER NOT NULL DEFAULT 0, downloaded INTEGER, path TEXT, expiry INTEGER, stars INTEGER NOT NULL DEFAULT 0 CHECK(stars BETWEEN 0 AND 5), position INTEGER NOT NULL DEFAULT 0, heard INTEGER NOT NULL DEFAULT 0, download_id INTEGER, manager_id INTEGER, new_in_last_refresh INTEGER NOT NULL DEFAULT 0 CHECK(new_in_last_refresh IN (0,1)), error TEXT, is_video INTEGER NOT NULL DEFAULT 0 CHECK(is_video IN (0,1)), byte_size INTEGER CHECK(byte_size IS NULL OR byte_size>0), UNIQUE(feed_id,guid));
 CREATE INDEX episodes_feed ON episodes(feed_id);
 CREATE INDEX episodes_downloads ON episodes(download_id);
 CREATE TABLE memberships(episode_id TEXT NOT NULL REFERENCES episodes(id) ON DELETE CASCADE, list_id TEXT NOT NULL REFERENCES lists(id) ON DELETE CASCADE, PRIMARY KEY(episode_id,list_id));

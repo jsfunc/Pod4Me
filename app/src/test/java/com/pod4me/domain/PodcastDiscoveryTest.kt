@@ -101,5 +101,17 @@ class PodcastDiscoveryTest {
         assertNull(PodcastDiscoveryClient.parsePodcast(JSONObject(valid.toString()).removeFeed(), "Related"))
     }
 
+    @Test fun appleLinksRequireExactHostAndPodcastIdAndKeepArtwork() {
+        assertEquals("123", PodcastDiscoveryClient.applePodcastId("https://podcasts.apple.com/fr/podcast/show/id123?i=456"))
+        assertEquals("123", PodcastDiscoveryClient.applePodcastId("https://itunes.apple.com/us/podcast/id123"))
+        assertNull(PodcastDiscoveryClient.applePodcastId("https://podcasts.apple.com.example.com/id123"))
+        try { PodcastDiscoveryClient.applePodcastId("https://podcasts.apple.com/fr/genre/podcasts"); fail("Podcast id required") }
+        catch (_: IllegalArgumentException) { }
+        val row = JSONObject().put("kind", "podcast").put("feedUrl", "https://example.com/rss")
+            .put("collectionViewUrl", "https://podcasts.apple.com/fr/podcast/id123").put("collectionName", "Show")
+            .put("artworkUrl100", "https://example.com/art.jpg")
+        assertEquals("https://example.com/art.jpg", PodcastDiscoveryClient.parsePodcast(row, "")!!.artworkUrl)
+    }
+
     private fun JSONObject.removeFeed() = apply { remove("feedUrl") }
 }

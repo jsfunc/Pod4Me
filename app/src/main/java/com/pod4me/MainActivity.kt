@@ -33,10 +33,10 @@ class MainActivity : ComponentActivity() {
         }
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                model.onLaunch()
                 model.player.connect()
                 val ticker = launch { while (isActive) { delay(500); model.player.refresh() } }
                 try {
+                    model.onLaunch()
                     while (isActive) {
                         delay(10_000)
                         if (model.library.value.episodes.any { it.downloadId != null }) {
@@ -46,6 +46,10 @@ class MainActivity : ComponentActivity() {
                 } finally { ticker.cancel(); model.player.disconnect() }
             }
         }
+    }
+    override fun onStop() {
+        if (!isChangingConfigurations) model.needsForegroundMaintenance = true
+        super.onStop()
     }
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); receive(intent) }
     private fun receive(intent: Intent?) {

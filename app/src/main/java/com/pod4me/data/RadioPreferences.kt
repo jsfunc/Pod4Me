@@ -13,7 +13,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** Personal station subscriptions; independent of podcast metadata and expiry. */
-class RadioPreferences(context: Context) {
+class RadioPreferences(context: Context, private val report: (String) -> Unit = {}) {
     private val app = context.applicationContext
     private val mutex = Mutex()
     private var loaded = false
@@ -47,10 +47,20 @@ class RadioPreferences(context: Context) {
             val saved = prefs.getString("stations", null)
             if (!loaded) {
                 mutableState.value = if (saved == null) RadioCatalogue.defaults else {
-                    val rows = JSONArray(saved)
-                    (0 until rows.length()).map { index -> rows.getJSONObject(index).let {
-                        RadioStation.create(it.getString("name"), it.getString("url"))
-                    } }.distinctBy { it.url }
+                    var invalid = false
+                    val recovered = try {
+                        val rows = JSONArray(saved)
+                        (0 until rows.length()).mapNotNull { index ->
+                            try { rows.getJSONObject(index).let { RadioStation.create(it.getString("name"), it.getString("url")) } }
+                            catch (_: Exception) { invalid = true; null }
+                        }.distinctBy { it.url }
+                    } catch (_: Exception) { invalid = true; emptyList() }
+                    if (invalid) {
+                        // Keep the exact original even if the user subsequently edits the recovered list.
+                        check(prefs.edit().putString("stations_recovery", saved).commit()) { "Could not preserve damaged radio subscriptions" }
+                        report("Some saved radio entries could not be loaded. Valid stations were kept and the original list was preserved for recovery.")
+                    }
+                    recovered
                 }
                 loaded = true
             }

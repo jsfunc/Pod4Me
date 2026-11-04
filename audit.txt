@@ -1,468 +1,397 @@
-POD4ME — CODE AUDIT
-===================
-Date: 2026-11-01
-Scope: working tree of /home/aurelien/repo/Pod4Me, branch main, commit 350bd04 ("Add independent
-       web podcast app and Cloudflare deployment"), git status clean. Covers the Android app
-       (1.0.11 / versionCode 19, SQLite schema 5, backup format 1), the browser app and its
-       Cloudflare Worker relay, the sharing website, the build/packaging tools and CI.
-       Every source, schema, migration, manifest, test, tooling and workflow file was read in
-       full (about 3,200 lines of Kotlin/Java, 1,200 lines of JavaScript, 620 lines of tooling).
-       Nothing was modified except this file and the two pointers to it in AGENTS.md and
-       docs/handover.md. This audit replaces the 2026-10-29 audit; its disposition is at the end.
+POD4ME — ANDROID CODE AUDIT
+===========================
+Date: 2026-11-04
+Scope: Android app only (user's choice), working tree of /home/aurelien/repo/Pod4Me, branch main,
+       commit ccd3b10 ("Compact subscription toolbar into one row of icons"), git status clean.
+       Version 1.0.20 / versionCode 28, SQLite schema 6, backup format 2, Media3 1.8.0.
+       Every Kotlin/Java source under app/src/main was read in full, plus the manifest, schema and
+       migration assets, Gradle build file, unit-test inventory, tools/build-apk.sh,
+       tools/serve-apk.py and .github/workflows/android.yml. The web app, Cloudflare Worker and
+       sharing website were out of scope. Their findings from the 2026-11-01 audit (B1, B4-B8,
+       B15, S3, S4, S6) are not re-evaluated here; their disposition is recorded in
+       docs/v1-verification.md.
+       This file replaces the 2026-11-01 audit. Apart from this file, only the audit pointers in
+       AGENTS.md and docs/handover.md were changed. No source code was changed.
 
-What was executed as part of the audit
---------------------------------------
-  java tools/CoreTestLauncher.java ................ PASS, 96 core checks
-  python3 -I tools/check_schema.py ................ PASS, 11 schema/XML checks
-  ./gradlew :app:testDebugUnitTest :app:lintRelease --offline
-      unit tests ................................... PASS, 80 tests, 0 failures/errors/skips
-      release lint ................................. 0 errors, 24 warnings (7 GradleDependency,
-                                                     9 UseKtx, 3 NewerVersionAvailable,
-                                                     2 ModifierParameter, 1 ExportedService,
-                                                     1 ObsoleteSdkInt, 1 AGP version)
-  node webapp/tests/domain.test.mjs ............... PASS 7/7
-  node webapp/tests/storage.test.mjs .............. PASS 7/7
-  node webapp/tests/worker.test.mjs ............... PASS 27/27
-  Live probes against https://pod4me.aurelien-garivier.workers.dev (today, 11:14 UTC):
-      /app/, app.mjs, domain.mjs, storage.mjs ...... HTTP 200, SHA-256 identical to the repo files
-      /.well-known/assetlinks.json ................. HTTP 200 application/json, fingerprint
-                                                     13:4A:95:23… = certificate of dist/Pod4Me.apk
-      /api/search?term=science&country=fr .......... 502 {"error": … "(HTTP 429)"}  (Apple throttles)
-      /api/chart?country=fr ........................ 502 {"error": … "(HTTP 403)"}  (Apple blocks)
-      itunes.apple.com /search, /lookup, /{cc}/rss/toppodcasts with a browser Origin header
-                                                     → 200 and "access-control-allow-origin: *"
-  Ad-hoc JVM probe of FeedParser memory (section B2) and a Node probe of the relay with UTF-16,
-  CDATA-DOCTYPE and RDF bodies (B4, B5).
+What was executed
+-----------------
+  java tools/CoreTestLauncher.java .................. PASS, 112 core checks
+  python3 -I tools/check_schema.py .................. PASS, 11 schema/XML checks
+  ./gradlew :app:testDebugUnitTest --rerun --offline  PASS, 116 tests, 0 failures/errors/skips
+                                                      (forced re-execution, not the Gradle cache)
+  ./gradlew :app:lintRelease --offline .............. 0 errors, 34 warnings (18 UseKtx,
+                                                      8 GradleDependency, 3 NewerVersionAvailable,
+                                                      2 ModifierParameter, 1 ExportedService,
+                                                      1 ObsoleteSdkInt, 1 AGP version)
+  Live probes (2026-11-04, ~15:40 CET, read-only):
+      all 59 RadioCatalogue URLs ..................... 59/59 HTTP 200 with audio. 54 progressive
+                                                      MP3/AAC (12 behind one or two HTTPS→HTTPS
+                                                      redirects), 5 HLS media playlists (BBC R2/R4,
+                                                      KTO, Mon petit France Inter, RNE). None stale.
+      3 seeded video feeds, 3 newest enclosures each . all reachable. TWiT/HOT use 3 HTTPS→HTTPS
+                                                      redirects (pscrb.fm → mgln.ai → cdn.twit.tv
+                                                      → cachefly). TWiT 1108 HD is 3,010,290,787
+                                                      bytes, HOT 0291 HD is 471,817,274 bytes.
+  Bytecode checks of the pinned Media3 1.8.0 jars (javap):
+      DefaultHttpDataSource.Factory() leaves allowCrossProtocolRedirects false (finding H2).
+      HlsPlaylistParser materializes the implied AES IV (Long.toHexString(mediaSequence)), so
+      RadioWindow's rewritten playlist keeps the correct IV. Checked, not a bug.
+      AudioFocusManager.willPauseWhenDucked() is true for AUDIO_CONTENT_TYPE_SPEECH (L6).
+  A JVM probe of FeedParser with 14 publisher date strings and 2 enclosures (L4).
 
-Not executed: the instrumented Android tests, the Playwright browser suite (needs a Playwright
-install and Chromium), a release assembly, and all 45 device checks in docs/device-checks.md.
-Everything that depends on One UI, the system media panel, DownloadManager, Safari, WhatsApp or
-real audio hardware is therefore as unverified in this audit as it is in the handover.
+Not executed: release assembly, the connected/instrumented tests, any phone or emulator run
+(ADB lists no device). Everything below that depends on real networks, Doze, audio focus,
+DownloadManager or One UI is inferred from the code and the library behaviour, not observed.
 
 Overall assessment
 ------------------
-No HIGH finding. The dangerous surfaces — XML from arbitrary publishers, SQL, file deletion,
-deep links and shared text, external media controllers, backup import, the public relay, HTML
-rendering in the browser — are handled carefully and defensively on both platforms, and the
-automated suites exercise exactly those surfaces. The code is small, readable and well layered.
+The podcast core (storage, migrations, deletion protection, progress epochs, backup and restore,
+parsing, sharing) is in good shape. The defensive work from the earlier audits holds, and the
+automated suite covers it well. No security regression was found.
 
-Two items deserve action soon:
+The weak spot is the newest code, live radio with rewind. The rewind design (capture upstream
+into a private rolling HLS window) is sound, but it has no recovery path. One upstream
+interruption ends the capture permanently, then deletes the buffered half hour as well (H1). On a
+phone that means leaving Wi-Fi, a tunnel, or a single failed HLS request. Before rewind (1.0.13–
+1.0.17), ExoPlayer's own load retries covered this case, so this is a resilience regression.
 
-  * S1  The release certificate is a renamed Android debug key with the default alias and
-        password, and the build script will mint a *new* certificate from the local debug
-        keystore if the personal one is missing. This is a key-hygiene problem, not a remote
-        vulnerability, but it is the one thing that could lock users out of updates or let a
-        leaked file sign a malicious update.
-  * B1  Web Discover is broken in production (Apple answers 429/403 to Cloudflare), confirmed
-        again today. Apple's three endpoints send `Access-Control-Allow-Origin: *`, so the fix is
-        to call Apple from the browser instead of through the relay.
+The second-largest risk is data cost: paused radio keeps downloading indefinitely (M1), and
+episode downloads/streams carry no size information (M3). One of the seeded sample episodes is
+3 GB, and downloads are allowed on mobile data.
 
-Everything else is LOW: parser/relay edge cases that reject feeds Android (or the web) accepts,
-a web refresh that silently re-subscribes, O(library) persistence on every web save, and small
-Android UX corners. The largest residual risk is procedural: not a single device or real-browser
-acceptance check has been completed for any version.
-
-Severity scale: HIGH = will bite in normal use, or a real security hole; MEDIUM = incorrect
-behaviour in a reachable situation, or a security weakness that needs a precondition;
-LOW = robustness, consistency or quality; INFO = worth knowing, no action required.
+Severity: HIGH = will bite in normal use, or a real security hole; MEDIUM = incorrect behaviour in
+a reachable situation, or real cost to the user; LOW = robustness, consistency, quality;
+INFO = worth knowing. "Improvement" items (section I) are suggestions, not defects.
 
 
-SECURITY REVIEW BY SURFACE
-==========================
+FINDINGS — BUGS AND UNDESIRABLE BEHAVIOUR
+=========================================
 
-A. Android application
-----------------------
-  Surface                     Verdict
-  ------------------------    -----------------------------------------------------------------
-  Exported components         MainActivity (MAIN, SEND text/plain, VIEW pod4me://, verified App
-                              Links on the sharing host, path "/"), PlaybackService
-                              (MediaSessionService), MediaButtonReceiver. DownloadReceiver is
-                              not exported. Nothing else. OK.
-  Incoming SEND / VIEW        domain/Suggestions.kt parses bounded text (64,000 chars), accepts
-                              only http(s) URLs via FeedParser.httpUrl (no javascript:/file:/
-                              credentials), rejects duplicate fields and unknown types; the UI
-                              always shows the URL and requires Subscribe/Download. No network
-                              or download is started by merely receiving a link. OK.
-  Media session               onConnect removes COMMAND_SET_MEDIA_ITEM and
-                              COMMAND_CHANGE_MEDIA_ITEMS for every controller; START/STOP/
-                              MARK_UNHEARD/TOGGLE/PLAY_QUEUE are offered and accepted only for
-                              the app's own package; others get ±10 s only. External apps cannot
-                              inject media or files. OK.
-  XML parsing                 SAX, namespace-aware; startDTD throws before any entity expansion
-                              (covers billion-laughs and internal entities), resolveEntity
-                              throws (XXE), 64 MiB cap on the *decoded* stream so gzip bombs are
-                              bounded, no DOM. Enclosure/artwork URLs re-validated and
-                              percent-escaped. Device test rejectsDtdOnAndroid exists for the
-                              Expat implementation (not yet run on a phone, see D1). OK.
-  SQLite                      Every statement is parameterised; identifiers come from constants;
-                              foreign keys enabled; one mutex + transaction per write; explicit
-                              additive migrations 1→5 with tests; downgrade throws. OK.
-  Files                       Audio lives in getExternalFilesDir(Podcasts) as <uuid>.audio.
-                              deleteFile checks the canonical parent directory before unlinking
-                              and refuses otherwise. Restore copies the picked document into a
-                              256 MiB-bounded temp file in cacheDir and deletes it. OK.
-  Backup import               Strict JSON streaming reader: fixed table order, whitelisted
-                              columns, type/length/range checks, system-list sanity, reference
-                              remapping, duplicate detection, whole-transaction rollback. Device
-                              paths and DownloadManager IDs are never imported. OK.
-  Network                     OkHttp with connect/read/call timeouts, Accept header, UA with
-                              version only. Cleartext allowed app-wide (S2). Apple directory:
-                              HTTPS, 2 MiB cap, 3.1 s spacing, host-validated outgoing links. OK.
-  Data at rest / backups      allowBackup=false and data_extraction_rules exclude everything from
-                              cloud backup and device transfer; discovery votes in a private
-                              SharedPreferences file. No logging of user data (no Log.* calls). OK.
-  Clipboard                   Read only on the explicit Paste button. OK.
-  Signing / build             See S1, S7. Release is non-debuggable, not minified (nothing to
-                              hide; no secrets in the APK). OK apart from S1.
+H1  HIGH    Any upstream radio interruption kills playback and discards the whole rewind buffer
+    Where: playback/RadioBuffer.kt:77-79 (capture job ends on the first exception, calls
+           window.fail), :161 (one failed HLS playlist poll, or any segment/key/init fetch at
+           :141-143, throws out of captureHls); playback/RadioWindow.kt:68 (once failure is set,
+           read() throws for EVERY name, including already-buffered segments); PlaybackService.kt
+           :97-102 → handlePlaybackError :193-212 (stop, clearMediaItems, closeRadioBuffer →
+           directory deleted).
+    What:  There is no reconnect anywhere in the capture path. Concretely:
+           - progressive MP3/AAC: Wi-Fi→mobile handover, a tunnel, or a server stall longer than
+             the 25 s read timeout ends the stream (EOFException/IOException);
+           - HLS: a single 5xx/timeout on the playlist poll or on one segment ends the capture.
+           The local window then refuses even old segments, so ExoPlayer's playlist reload fails
+           after its default retries, onPlayerError fires and the service unloads the station and
+           deletes the cache. The user sees "Could not play X…" and loses the 30-minute rewind
+           window. This also happens when the user is paused or listening 20 minutes behind
+           live, where the buffered audio is still perfectly playable.
+    Fix:   (1) Keep serving existing segments after a capture failure; make read() throw only
+           for the live edge once the buffer is exhausted. (2) Retry upstream with bounded
+           backoff (e.g. 1, 2, 4, 8, 15 s, then every 15 s for a few minutes), append with
+           discontinuous=true after reconnecting (HLS already supports discontinuity; for MP3/AAC
+           set it on the first chunk after reconnect), and surface "Reconnecting…" through the
+           existing Buffering status. (3) Let a transient HLS fetch failure skip that poll rather
+           than abort. Add RadioBufferTest cases for "upstream drops, then recovers" and
+           "upstream drops while paused".
 
-B. Web app and Cloudflare relay
--------------------------------
-  Surface                     Verdict
-  ------------------------    -----------------------------------------------------------------
-  Relay target validation     publicUrl rejects non-http(s), credentials, ports, IP literals
-                              (incl. normalised hex/int forms), bracketed IPv6, dot-less and
-                              reserved/local names, control chars, and re-validates every
-                              redirect (max 5). Directory requests are pinned to
-                              itunes.apple.com. URL-level only, no DNS pinning (S4).
-  Relay content bounds        Content-Type allow-list, Content-Length pre-check, streamed body
-                              cap (32 MiB feed / 2 MiB directory), 30 s deadline covering the
-                              body, 204/206 refused, XML preamble check so it cannot be used as a
-                              generic proxy, publisher cookies/caller headers never forwarded,
-                              errors never cached. OK.
-  Relay access control        GET only; Origin / Sec-Fetch-Site checked when present; no CORS
-                              headers ever emitted. Scripted clients pass (S3).
-  Response headers            nosniff, no-referrer, CORP same-origin, CSP "default-src 'none';
-                              sandbox" on all API responses; static pages get X-Frame-Options
-                              DENY, nosniff, no-referrer, Permissions-Policy from _headers
-                              (verified live). OK.
-  Browser HTML injection      All interpolated values go through esc(); dialog titles/toasts use
-                              textContent; publisher HTML is parsed into an inert <template>
-                              with script/style/iframe/object/embed removed and only its
-                              textContent kept (the browser test asserts no script executes);
-                              CSP script-src 'self', object-src 'none', base-uri 'none',
-                              frame-src 'none'. OK.
-  Stored data                 IndexedDB content is re-validated on load (types, lengths, URL
-                              safety, references, limits); writes are serialised and guarded by a
-                              revision check so a stale tab cannot overwrite another. OK.
-  Backup import               inspectInput walks the parsed JSON first (depth/node/char limits,
-                              prototype keys, accessors, custom prototypes), then whitelists.
-                              Restore requires confirmation and is atomic. OK.
-  Shared links                parseShared mirrors Android: typed links first, http(s) only,
-                              duplicate fields rejected, explicit "Add"/"Subscribe" required. OK.
-  Privacy                     Cloudflare sees feed URLs and search terms (documented). Apple sees
-                              search terms + country (and, after B1's fix, the user's IP).
-                              Publishers see the listener's IP for audio/artwork (inherent).
-                              referrerpolicy=no-referrer on images, meta referrer no-referrer. OK.
+H2  MEDIUM  Video streaming fails when the enclosure redirects between http and https
+    Where: playback/PlaybackService.kt:53-54 (DefaultDataSource.Factory(this) → default
+           DefaultHttpDataSource.Factory, allowCrossProtocolRedirects=false, verified by javap).
+    What:  STREAM_VIDEO plays ep.audioUrl through ExoPlayer's HTTP stack, which refuses
+           http→https or https→http redirects. Many feeds still publish http:// tracking
+           prefixes (podtrac, blubrry, chartable-style chains) that redirect to an https CDN.
+           Such episodes fail with "The video stream could not be played…", while Download of
+           the same URL works (DownloadManager follows the redirect). The three seeded feeds are
+           unaffected (all hops are HTTPS→HTTPS, probed today), which is why this has not shown
+           up.
+    Fix:   DefaultDataSource.Factory(this, DefaultHttpDataSource.Factory()
+           .setAllowCrossProtocolRedirects(true).setUserAgent("Pod4Me/…")), or the
+           media3-datasource-okhttp module with the app's OkHttpClient (same Media3 version, so
+           still no upgrade). Add a test with a MockWebServer http→https redirect.
 
-C. Sharing website, hosting, tooling
-------------------------------------
-  website/link.js + page.js   Hash parsed with a strict regex, URLs validated, duplicate fields
-                              rejected, DOM updated via textContent only, intent:// link built
-                              with encodeURIComponent. CSP default-src 'none', connect-src
-                              'none'. OK.
-  Packaging scripts           Staging in temp dirs, zip-slip check on extraction, symlink
-                              refusal, fingerprint taken from the verified local APK (never
-                              typed), ENS download URL must be HTTPS without credentials. OK.
-  deploy.sh                   Pinned wrangler@4.156.0 and node@22 via npx --yes (downloads at
-                              deploy time from npm; acceptable, documented). Metrics disabled.
-  serve-apk.py                See S5.
-  CI                          Read-only token, pinned actions by major version, debug APK
-                              artifact (S7).
+M1  MEDIUM  Paused radio keeps downloading without limit
+    Where: PlaybackService.togglePlayback :331-335 (pause leaves the capture running);
+           RadioBuffer.kt capture loop; RadioWindow only bounds what is kept, not what is fetched.
+    What:  Handover-accepted behaviour is "Pause keeps capture running". Nothing stops it,
+           though. A station paused and forgotten keeps streaming for as long as the service
+           lives: about 58 MB/hour at 128 kbps, on mobile data too. Once the paused position is
+           older than 30 minutes, the extra data has no use. On resume, the onPlayerError branch
+           for ERROR_CODE_BEHIND_LIVE_WINDOW jumps to the oldest retained audio anyway. While
+           paused, ExoPlayer drops its wake/Wi-Fi locks, so with the screen off the capture can
+           also stall and hit the H1 failure. Resuming then shows an error instead of the buffer.
+    Fix:   Stop capturing once paused for longer than the window, or after a fixed limit such as
+           30 minutes. Keep the station loaded so Resume reconnects at live. Optionally keep a
+           partial wake lock only while capturing during a pause.
+
+M2  MEDIUM  One unplayable file stops the whole playlist
+    Where: PlaybackService.kt:97-103 → handlePlaybackError :193-212.
+    What:  When an auto-advanced or Next/Previous item fails, playback stops and everything is
+           unloaded with a generic message. Examples: corrupt or truncated download, or a
+           "Previous" item whose file expired or was deleted since it was put in the timeline;
+           rebuildUpcoming refreshes only the items after the current one. The queue and context
+           are not consumed, but the user must start again by hand. This is common enough in
+           practice: a partial download that passed the HTML sniff, or an unsupported codec.
+    Fix:   For local podcast items, mark the failing episode with an error ("This download
+           could not be played"), remove it from the timeline, and continue with the next
+           playable item. Stop only when nothing playable remains. Rebuild the preceding items
+           too when files disappear.
+
+M3  MEDIUM  Downloads and streams give no size information; multi-gigabyte downloads go over
+            mobile data in one tap
+    Where: FeedParser ignores enclosure length; LibraryStore.download :255
+           (setAllowedOverMetered(true)); seeded feeds LibraryStore.kt:81-85.
+    What:  The seeded "This Week in Tech (Video)" HD feed has 3.0 GB episodes (measured today).
+           One tap on Download starts it on mobile data with no warning, and storage space is
+           only checked by DownloadManager. Streaming the same file in the background is equally
+           costly. Mobile data on downloads is an accepted rule; the missing size display and
+           confirmation are the problem.
+    Fix:   Store <enclosure length> (schema 7 migration, nullable) and show it beside the
+           duration ("23min · 48 MB"). Ask for confirmation above a threshold (e.g. 500 MB) or
+           when the network is metered. Consider seeding TWiT's smaller video variants.
+
+L1  LOW     Every return to the foreground and every rotation reloads the whole library
+    Where: MainActivity.kt:35-37 (repeatOnLifecycle(STARTED) { model.onLaunch(); connect() });
+           AppModel.onLaunch :57-60; LibraryStore.initialize :78 (write(force=true) →
+           full snapshot + catalogueRevision+1).
+    What:  Each STARTED (home→back, unlocking, rotation) re-runs the full launch work in this
+           order: full SQLite snapshot, seeding checks, radio prefs read, DownloadManager
+           reconcile, expiry, storage scan. Only then does the player controller connect.
+           Effects: (a) the revision bump re-sorts every list and rebuilds an open feed-search
+           index (FeedSearchState.kt:17 keys on revision), and re-reads open Info notes;
+           (b) after rotating a playing video, the surface stays black and the Live Play
+           buttons stay disabled (playback.connected=false) until all of that finishes;
+           (c) expiry deletion runs much more often than "on launch".
+    Fix:   Connect the controller first. Run initialize/seeding once per process (the
+           Application already initializes the store). Run reconcile/expiry/storage once per
+           foreground session, and not on a configuration change (check isChangingConfigurations
+           or move it to ProcessLifecycleOwner ON_START). Don't bump catalogueRevision when the
+           snapshot is unchanged.
+
+L2  LOW     HLS radio picks the lowest-bitrate variant
+    Where: RadioBuffer.kt:123 (variants … minByOrNull { bitrate }).
+    What:  For multivariant playlists without a separate audio rendition, the capture
+           deliberately takes the worst quality (often 48 kbps HE-AAC). Today's catalogue HLS
+           URLs are already media playlists, so this only affects custom URLs.
+    Fix:   Prefer the highest audio-only variant up to ~192 kbps (lower on metered networks if
+           desired).
+
+L3  LOW     Common radio playlist wrappers (.m3u / .pls) are rejected
+    Where: RadioBuffer.kt:50-51 (any "mpegurl" content type → HLS parser), RadioFrames.
+    What:  Many station sites publish "listen.m3u" or ".pls" files that simply point to an
+           Icecast URL. A plain .m3u without #EXTM3U fails in HlsPlaylistParser. An extended
+           M3U wrapping an endless Icecast stream is treated as a live HLS playlist whose single
+           "segment" never ends, so it fails at "Radio segment is too large" after 8 MB. A .pls
+           reaches RadioFrames and fails as "not an MP3 or AAC stream". All of these end in the
+           generic "Could not play…" message.
+    Fix:   Before the HLS parser: if the body has no #EXT-X-TARGETDURATION (or is a .pls),
+           extract the first http(s) entry and restart with it (one level only).
+
+L4  LOW     Several real-world pubDate forms become "Date unknown"
+    Where: domain/FeedParser.java:230-262. Probe results (UNKNOWN = parsed as 0):
+           "+01:00" offsets (Tue, 03 Nov 2026 10:00:00 +01:00), "Z", CET/CEST/BST/MET/AEST
+           abbreviations, "Sept", French "déc"/"févr" without the dot, and
+           "2026-11-03 10:00:00" (space instead of T). These parse correctly: +0100, GMT/UT/
+           US zones, no seconds, "mar., 03 nov. 2026", ISO with offset.
+    What:  Undated episodes sort last in Latest and break the "most recent past" anchor.
+    Fix:   Normalize before parsing: "+hh:mm"→"+hhmm", "Z"→"+0000", add CET/CEST/BST/MET/EET
+           to the zone map, strip trailing dots from month tokens and map "sept"→"sep", and
+           accept "yyyy-MM-dd HH:mm[:ss]". Add the probe strings to CoreChecks.
+
+L5  LOW     Radio subscriptions are all-or-nothing on load
+    Where: data/RadioPreferences.kt:49-54 (each saved row goes through RadioStation.create).
+    What:  If one stored station stops passing validation (for example a stricter rule in a
+           later version), read() throws and the whole Live list stays empty. START_RADIO and
+           resumption also fail.
+    Fix:   Skip, and report once, rows that fail validation instead of failing the whole list.
+
+L6  LOW     Radio is typed as speech: navigation prompts pause it instead of ducking it, and
+            it drifts behind live
+    Where: PlaybackService.kt:56 (CONTENT_TYPE_SPEECH for everything); Media3 pauses on
+           duckable focus loss for speech (javap-verified).
+    What:  Correct for podcasts. For live radio, each GPS prompt or notification sound pauses
+           the stream, and resuming continues from the paused point inside the rewind window.
+           After a drive with navigation, the radio is minutes behind live without the user
+           noticing. "Back to live" exists, but nothing prompts for it.
+    Fix:   Set CONTENT_TYPE_MUSIC (duck) for radio, and SPEECH back for podcasts. Optionally
+           make speech/music a per-station choice.
+
+L7  LOW     Media-button resumption after a radio or video session keeps the network wake mode
+    Where: PlaybackService.onPlaybackResumption podcast branch :131-142 (no setWakeMode), and
+           stopPlayback :240-256 (does not reset it).
+    What:  After Stop on radio or video, a headset Play resumes a local podcast while
+           WAKE_MODE_NETWORK is still set, holding a Wi-Fi lock for no reason. startEpisode
+           resets it; the resumption path does not.
+    Fix:   setWakeMode(C.WAKE_MODE_LOCAL) in the podcast resumption branch (and in stopPlayback).
+
+L8  LOW     The service and the view model do O(library) work on the main thread at every
+            progress save
+    Where: PlaybackService.kt:183-185 (library.map { queue to episodes.filter{…}.map{…} } on
+           Dispatchers.Main.immediate); AppModel.kt:46-51 (episodes → Triple list on Default).
+    What:  While playing, every 5-second save publishes a new Library, and both collectors
+           rebuild per-episode lists. Unnoticeable with hundreds of episodes; measurable at the
+           10,000+ episodes the store is designed for.
+    Fix:   Expose a small derived flow from the store (queue + downloaded-ids revision) and
+           collect that instead.
+
+L9  LOW     HLS keys and init sections are refetched for every segment
+    Where: RadioBuffer.kt:141-143.
+    What:  With encrypted or fMP4 radio, each 4-10 s segment triggers extra HTTP requests for
+           the same key/init URI. This doubles the requests and adds failure points (see H1).
+    Fix:   Cache the last key/init bytes by resolved URI (and byte range).
+
+L10 LOW     Completed-download notifications accumulate
+    Where: LibraryStore.download :256 (VISIBILITY_VISIBLE_NOTIFY_COMPLETED).
+    What:  Each finished download leaves its own system notification, and the app already shows
+           the state in Library. After a refresh session this is a pile of notifications to
+           swipe away.
+    Fix:   Use VISIBILITY_VISIBLE (progress only), or one summary notification of your own.
+
+L11 LOW     Carried-over minor items, still present
+    - B16: one LazyListState per distinct search string, never evicted (PodApp.kt:200).
+    - Duplicate subscriptions differing only by a trailing slash, or by http/https, are not
+      detected (AppModel.importFeeds compares exact strings).
+    - FeedParser.httpUrl reports internationalized (non-ASCII) host names as "…without embedded
+      credentials", which is misleading. Convert them with IDN.toASCII, or word the message
+      generically.
 
 
-FINDINGS
+SECURITY
 ========
-
-Security
---------
-
-S1  MEDIUM  Release signing key is a renamed debug key with default credentials; the build
-            script can silently mint a new certificate
-    Where: app/build.gradle.kts:33-40 (alias "androiddebugkey", password "android" unless env
-           overrides); tools/build-apk.sh:15-24 (copies ~/.android/debug.keystore to
-           pod4me-v1.keystore when the personal file is absent).
-    What:  Any copy of ~/.android/pod4me-v1.keystore signs updates every installed phone
-           accepts, and the password protecting it is the universally known debug default. The
-           project already has two live certificates (134a… here, 6585… on the other machine),
-           which is exactly the failure mode the fallback produces: run the script on a new
-           machine without the key and you get a third certificate and another forced reinstall.
-    Why it matters: not remotely exploitable, but it is the single point that can either lock
-           users out of updates (lost/duplicated key) or let a leaked file deliver a malicious
-           update. The APK is publicly downloadable from ENS, so its certificate is the only
-           thing that ties updates to you.
-    Fix:   Keep the current certificate (changing it forces reinstall). Then: (1) remove the
-           auto-copy fallback so a missing key fails with instructions instead of creating a
-           new one; (2) change the keystore/key password (keytool -storepasswd / -keypasswd) and
-           supply it via POD4ME_STORE_PASSWORD / POD4ME_KEY_PASSWORD, never as a default in the
-           build file; (3) keep one encrypted offline backup; (4) record in docs/handover.md
-           which certificate the phone actually runs (still "unverified" there).
-
-S2  LOW     Cleartext HTTP is permitted for every host; HTTPS→HTTP redirects are followed
-    Where: app/src/main/AndroidManifest.xml:12 (android:usesCleartextTraffic="true", no
-           networkSecurityConfig); data/FeedClient.kt (OkHttp default followSslRedirects);
-           DownloadManager requests in data/LibraryStore.kt:227.
-    What:  Feeds and audio may be fetched over plain HTTP, and a feed that redirects from https
-           to http is accepted. An on-path attacker on a hostile Wi-Fi can rewrite episode
-           metadata or substitute audio content. Parser hardening means the impact is content
-           integrity, not code execution.
-    Fix:   This is a legitimate trade-off (many podcast feeds are still http://). Cheap
-           improvements: try the https:// variant first when a user enters an http:// URL and
-           keep https if it works; set followSslRedirects(false) and surface the downgrade as a
-           feed error; show a small "insecure" marker on http feeds. The web app's relay already
-           normalises this problem away for browser users.
-
-S3  LOW     The relay is a public, unauthenticated, unrated metadata proxy
-    Where: webapp/worker.mjs:61-68 (sameOrigin only applies when Origin/Sec-Fetch-Site are
-           sent), 203-293.
-    What:  Any script can fetch arbitrary public RSS/Atom (≤ 32 MiB) or Apple JSON (≤ 2 MiB)
-           through your Worker. Worst case is exhausting the Workers Free daily request/CPU
-           allowance (denial of your own service) and modest bandwidth amplification. The XML
-           preamble check prevents use as a general-purpose proxy; this is documented in
-           docs/web-app.md.
-    Fix:   Add a Cloudflare rate-limiting rule for /api/* (one rule is included in the free
-           plan), and consider requiring Sec-Fetch-Mode: cors + Sec-Fetch-Site: same-origin for
-           /api/* (all browsers that can run the app send them). Keep the current fail-closed
-           behaviour on errors.
-
-S4  LOW     SSRF defence is URL-level only
-    Where: webapp/worker.mjs:30-51, 74-97.
-    What:  A public hostname that resolves to an internal address passes publicUrl; redirects
-           are re-validated but DNS is not pinned. In practice Cloudflare refuses Worker fetches
-           to private/Cloudflare-internal ranges, and the response must look like a feed to be
-           returned, so exposure is minimal and already documented.
-    Fix:   None required beyond keeping the documentation honest. Do not add R2/KV bindings or
-           secrets to this Worker without revisiting this.
-
-S5  LOW     serve-apk.py exposes all of dist/ with directory listings on every interface
-    Where: tools/serve-apk.py:19 (bind 0.0.0.0), SimpleHTTPRequestHandler default listing.
-    What:  While running, anyone on the LAN can browse dist/, which also holds the web
-           deployment package, checksums and QA screenshots. No secrets are in dist/, but the
-           intent is "serve the APK".
-    Fix:   Serve only *.apk and *.sha256 (override list_directory to 403, or copy the APK to a
-           temp dir), and/or bind to the Wi-Fi interface address that is printed.
-
-S6  INFO    Web CSP permits http: media and https: images
-    Where: webapp/public/app/index.html:8.
-    What:  media-src http: is needed for publishers without HTTPS audio; browsers will block or
-           auto-upgrade it as mixed content and the player shows a message. img-src https:
-           lets publishers see the listener's IP (same as audio; inherent to streaming).
-           Everything else in the policy is tight. No action.
-
-S7  INFO    CI artifact is a debuggable debug APK signed with the runner's key
-    Where: .github/workflows/android.yml ("Prepare APK download").
-    What:  Fine for build verification, must never be distributed (README already says so).
-           The workflow also runs check_schema.py without -I (harmless on a runner).
-
-S8  INFO    Dependency currency
-    What:  Lint reports 7 GradleDependency + 3 NewerVersionAvailable + 1 AGP notice. No known
-           CVEs were identified in the pinned set (OkHttp 4.12.0, Media3 1.8.0, Coil 2.7.0,
-           kotlinx-coroutines 1.10.2, Compose BOM 2025.10.01, Robolectric 4.16). The web app
-           has zero runtime npm dependencies; Wrangler is pinned. Review quarterly.
-
-Bugs and undesirable behaviour
-------------------------------
-
-B1  MEDIUM  Web Discover does not work in production (Apple 429/403 to Cloudflare) — and the
-            relay is unnecessary for it
-    Where: webapp/worker.mjs:252-278 (/api/search, /api/chart); webapp/public/app/app.mjs:97-98
-           (directory(), discover()); index.html:8 (connect-src 'self').
-    What:  Reproduced today: search → 502 "(HTTP 429)", chart → 502 "(HTTP 403)". Apple
-           throttles or blocks Cloudflare egress addresses. Verified today that
-           itunes.apple.com/search, /lookup and /{country}/rss/toppodcasts/.../json all return
-           `access-control-allow-origin: *`, so a browser can call them directly from the
-           user's own IP — the same path the Android app already uses successfully.
-    Fix:   In app.mjs, call Apple directly (keep the 3.1 s client-side spacing, the 2 MiB
-           response cap and the existing sanitiser directoryRows — move it into domain.mjs);
-           add https://itunes.apple.com to connect-src; keep /api/feed; retire /api/search and
-           /api/chart or leave them as a fallback. Update docs/web-app.md privacy text: Apple
-           will then see the user's IP as well as the search term and country (it already does
-           for Android users). This also removes two Worker invocations per Discover tap.
-
-B2  LOW     FeedParser keeps all episode text in memory; the 64 MiB cap bounds bytes, not heap
-    Where: app/src/main/java/com/pod4me/domain/FeedParser.java:18, 49-63, 126-137, 143-152.
-    What:  Every item's title/description is retained until parsing ends, then copied into
-           ContentValues for SQLite. Measured on the JVM (Latin-1 content, -Xmx256m): a 20.6 MiB
-           feed → 33 MiB live heap; 41.2 MiB → 106 MiB; 61.6 MiB → 124 MiB, all in < 200 ms, no
-           OOM. Android's ART also stores Latin-1 strings compactly, so Western feeds are fine
-           up to the cap. Feeds whose show notes are predominantly non-Latin (Cyrillic, CJK,
-           Greek) use two bytes per char and would roughly double these numbers, approaching a
-           256 MiB default heap on a 64 MiB feed. Real podcast feeds today top out around
-           10–20 MiB.
-    Fix:   Cap individual captured fields (e.g. 1 MiB per description, 4 KiB per title, keep
-           the head) and/or lower the document cap to the web app's 32 MiB. Do not use
-           largeHeap for this.
-
-B3  LOW     Media RSS audio (<media:content>) without <enclosure> is skipped on both platforms
-    Where: FeedParser.java:107-111; webapp/public/app/domain.mjs:123-130.
-    What:  Publishers that only use <media:content type="audio/..."> get "N episode(s) skipped:
-           no supported, valid audio enclosure" and an empty feed. The message is honest, but
-           the feed is usable.
-    Fix:   Fall back to the first audio <media:content url> when no enclosure is present.
-
-B4  LOW     Web rejects feeds containing "<!DOCTYPE" anywhere, including inside CDATA show notes
-    Where: webapp/public/app/domain.mjs:41 (regex over the whole document).
-    What:  Show notes that embed an HTML document inside CDATA make the entire feed fail in the
-           browser with "XML document types are not supported", while the relay (prefix check,
-           worker.mjs:137-157, confirmed by probe) and Android (real DTD only) accept it.
-    Fix:   Apply the same preamble-only test as the Worker. DOMParser does not resolve external
-           entities, so the risk being guarded against is entity expansion in a real DTD, which
-           the preamble check already covers.
-
-B5  LOW     Relay rejects UTF-16 feeds
-    Where: webapp/worker.mjs:141 (TextDecoder() defaults to UTF-8 for the preamble check).
-    What:  Reproduced with a BOM-prefixed UTF-16LE RSS body: 415 "This address does not contain
-           a supported RSS or Atom feed." Android parses the same feed (SAX honours the BOM).
-           UTF-16 feeds are rare but exist.
-    Fix:   Detect the BOM (FF FE / FE FF) or the charset parameter and decode the preamble with
-           that encoding; pass it through to the browser unchanged (it already forwards the
-           charset).
-
-B6  LOW     Web: Refresh on an unsubscribed podcast silently re-subscribes it
-    Where: webapp/public/app/app.mjs:61 (↻ Refresh shown in every feed view),
-           domain.mjs:249 (mergeFeed always sets subscribed: true).
-    What:  Open an unsubscribed podcast from an episode, press Refresh: it is subscribed again
-           without any confirmation and appears in Podcasts. Refresh-all is correctly limited to
-           subscriptions and the busy guard prevents the race with Unsubscribe.
-    Fix:   Preserve the previous `subscribed` value in mergeFeed for existing feeds, or replace
-           Refresh with "Subscribe" on unsubscribed feed pages.
-
-B7  LOW     Web: the entire library is re-validated and rewritten on every change and every 15 s
-            of playback
-    Where: webapp/public/app/app.mjs:103, 108-109 (savePosition → persist); storage.mjs:115-125,
-           193-262 (validateLibrary over every feed/episode/bookmark, then one IndexedDB put).
-    What:  O(library) main-thread work per save: regexes and URL parsing per episode plus a
-           structured clone of the whole object. Unnoticeable at a few hundred episodes; at the
-           advertised 100,000-episode cap it is seconds per save, every 15 seconds.
-    Fix:   Store playback positions/heard flags in a separate small record keyed by episode id,
-           or debounce saves and validate only the touched objects (validate fully on
-           load/import, which already happens).
-
-B8  LOW     Android ↔ web URL acceptance differs
-    Where: domain.mjs:7-19 (safeUrl rejects non-standard ports, dot-less hosts, IP literals);
-           FeedParser.httpUrl (accepts them); enclosure type rules differ (FeedParser.java:109
-           accepts application/octet-stream and empty type; domain.mjs:128 requires audio/*,
-           application/ogg or a known extension).
-    What:  A feed list or recommendation produced on Android can contain URLs the web app
-           refuses with "Only public HTTP or HTTPS addresses on standard ports are supported",
-           and some episodes present on Android are "skipped" on the web.
-    Fix:   Document the difference, or relax the web rule for ports on import/share (the relay's
-           stricter rule can stay).
-
-B9  LOW     Android: accepting an episode suggestion with "Also subscribe" can create a
-            duplicate undated episode
-    Where: app/src/main/java/com/pod4me/data/LibraryStore.kt:162-173 (addSharedAudio matches
-           only by audio_url; inserts published=0, guid=url); ui/AppModel.kt:150-159.
-    What:  When the recipient's copy of the feed uses a different enclosure URL for the same
-           episode (tracking prefixes, CDN host changes), the shared episode is inserted as a
-           second row in that feed, shown as "Date unknown" at the bottom of Latest, and the
-           next refresh cannot merge it.
-    Fix:   After subscribing, match on guid or on URL path/filename as well; or keep shared
-           downloads in the "shared" pseudo-feed unless an exact match exists.
-
-B10 LOW     Android: a second operation while busy is dropped silently
-    Where: ui/AppModel.kt:161-165 (network() returns if busy).
-    What:  Most buttons are disabled while busy, but asynchronous entry points are not: a file
-           picked for Import/Restore, an accepted incoming share, or Suggest while a long
-           refresh runs are ignored with no feedback.
-    Fix:   Set a notice ("Please wait for the current operation to finish") instead of
-           returning, as the web app does.
-
-B11 LOW     Android: Pod4Me HTTPS links are recognised only with an explicit "/" path
-    Where: domain/Suggestions.kt:27 (uri.rawPath == website.rawPath).
-    What:  "https://pod4me.aurelien-garivier.workers.dev#feed?url=…" (no slash, a common
-           result of retyping or of some link shorteners) falls through to the raw-URL branch
-           and the dialog asks whether the Pod4Me site itself is a feed. All links generated by
-           Pod4Me/web include the slash.
-    Fix:   Accept rawPath "" as equivalent to "/".
-
-B12 LOW     Android: an episode becomes deletion-protected before playback is prepared, and the
-            error for a non-audio download suggests the wrong remedy
-    Where: data/LibraryStore.kt:306-311 (activate sets activeEpisode); playback/
-           PlaybackService.kt:87 (onPlayerError), data/LibraryStore.kt:251-263 (reconcile
-           accepts any non-empty file).
-    What:  If ExoPlayer fails on the file (e.g. the publisher returned an HTML error page with
-           HTTP 200, saved as .audio), the episode stays "current" and undeletable until Stop,
-           and the message says "Try downloading this episode again", which will not help.
-    Fix:   On onPlayerError clear activeEpisode when nothing is playing; at reconciliation
-           sniff the first bytes (ID3/"RIFF"/"OggS"/MP4 "ftyp"/HTML "<") and report
-           "The download is not an audio file" instead of storing it.
-
-B13 LOW     Android: the `changing` flag stays raised across a suspension point
-    Where: playback/PlaybackService.kt:182-188 (markUnheard sets changing=true, then suspends on
-           store.membership).
-    What:  Player callbacks during that window (pause, seek) skip their progress save; the
-           5-second ticker catches up. Cosmetic; the pattern was noted in the 2026-10-29 audit
-           (F13) and is still the only re-entrancy guard.
-    Fix:   Narrow the flag to the synchronous seekTo, or use a per-operation token.
-
-B14 LOW     Android: RFC 822 dates with two-digit years or non-English month names → "Date
-            unknown"
-    Where: FeedParser.java:188-208.
-    What:  Such episodes sort last and highlight as undated. Zone names, ISO and date-only
-           forms (old F3) are handled.
-    Fix:   Add "EEE, d MMM yy HH:mm:ss Z" and try Locale.FRENCH as a second locale, or accept.
-
-B15 INFO    Documented-but-easy-to-miss behaviour differences
-    - Web Latest includes episodes of unsubscribed feeds; Android excludes them.
-    - Web "4ever" is a metadata marker only; there is no expiry or audio to protect.
-    - Web domain.mjs can parse RDF/RSS 1.0, but the relay answers 415 for it (confirmed by
-      probe), so neither platform supports RSS 1.0 in practice. Say so once in docs.
-    - The relay caches each feed for 5 minutes; a manual Refresh inside that window returns the
-      cached XML (documented in web-app.md).
-
-B16 INFO    Scroll-state cache keyed by search text
-    Where: ui/PodApp.kt:198-200 ("search:$browseFeed:$searchQuery").
-    What:  One LazyListState is created per distinct query string typed in a session and never
-           evicted. Negligible memory; mentioned for completeness.
-
-Documentation and process
--------------------------
-
-D1  No device or real-browser acceptance has ever been completed. The Android XML hardening
-    relies on Expat behaviour that only the instrumented test rejectsDtdOnAndroid exercises;
-    the 80 JVM tests run on Robolectric/Xerces. Run `./gradlew :app:connectedDebugAndroidTest`
-    once on the S24 and record it in docs/device-checks.md; then work through checks 41–45.
-
-D2  Deployment consistency (verified today): the live /app/ bundle is byte-identical to
-    webapp/public/app/, the live assetlinks fingerprint equals the certificate of
-    dist/Pod4Me.apk (134a…), and the root page links to the ENS APK. README and the handover
-    describe the Discover failure accurately. No stale-deployment issue found.
-
-D3  AGENTS.md and docs/handover.md described audit.txt as the historical 2026-10-29 audit; both
-    pointers were updated to refer to this audit. The handover's long "Current state" section
-    now mixes release history with current facts; a periodic pruning into a short "Current
-    state" plus a "History" subsection would make the next session faster.
+No new issue. The new surfaces were checked:
+  - Radio buffer: files are named from a local counter, and the DataSource only serves names
+    present in the window, so no path traversal. The pod4me-radio:// URIs are checked for their
+    random per-buffer authority. Playlist/segment/key URLs go through FeedParser.httpUrl
+    (http/https, no credentials) with 1 MiB playlist and 8 MiB segment caps. Abandoned caches are
+    deleted. A hostile playlist can make the phone request arbitrary http(s) URLs, including LAN
+    addresses. This is inherent to streaming and equivalent to enclosures; acceptable for
+    private use.
+  - Video streaming: limited to episodes flagged as video, URL re-validated in activate(), and
+    only the app's own controller can send STREAM_VIDEO/START_RADIO (onConnect/onCustomCommand
+    package checks unchanged).
+  - YouTube rows are never fetched. ACTION_VIEW uses a re-normalized https://www.youtube.com URL.
+Carried over, unchanged by decision:
+  S1  MEDIUM  Signing key is a renamed debug key with default password; build-apk.sh:15-24 still
+              copies ~/.android/debug.keystore when the personal key is missing, minting a new
+              certificate. Excluded by the user on 2026-11-01. Still recommended: make a missing
+              key a hard failure, and keep an offline backup of pod4me-v1.keystore.
+  S2  LOW     usesCleartextTraffic=true app-wide, and OkHttp follows https→http redirects.
+              Deferred by the user. Note that H2's fix (allowing cross-protocol redirects for
+              video) widens the same trade-off slightly. It is consistent with feed and download
+              behaviour.
+  S7  INFO    CI still runs check_schema.py without -I; harmless on a runner.
 
 
-STATUS OF THE 2026-10-29 AUDIT (F1–F18)
----------------------------------------
-Verified in the current code, not from the notes:
-  F1  snapshot per write          FIXED   lightweight projection, per-episode fast path,
-                                          notes loaded on demand (LibraryStore.write/description)
-  F2  resort every 500 ms         FIXED   remember keyed on catalogueRevision; only player
-                                          components read position
-  F3  dates                       FIXED   zone map + ISO/date-only; two-digit years remain (B14)
-  F4  enclosure escaping          FIXED   escapeReference + httpUrl
-  F5  namespace-blind capture     FIXED   canonical()/rssNamespace, extension namespaces isolated
-  F6  unheard undone by save      FIXED   progress epochs, reset routed through the service
-  F7  declared vs measured        FIXED   measured duration wins; >7-day declared → unknown
-  F8  cold session "active"       FIXED   nothing loaded until Play/resumption
-  F9  Previous seeding            FIXED   up to five preceding downloaded items
-  F10 no backup                   FIXED   portable JSON backup/restore, format 1
-  F11 DownloadManager records     FIXED   manager_id retained deliberately, removed on deletion
-  F12 quick-settings ±10 s        OPEN    device-only (D1)
-  F13 `changing` guard            OPEN    still the only guard (B13), harmless
-  F14 misleading messages         MOSTLY  user-facing texts rewritten; B12 remains
-  F15 no pruning                  ACCEPTED (handover: rolling history retained by design)
-  F16 goal.txt deviations         DOCUMENTED in docs/handover.md "Accepted product behavior"
-  F17/F18 quality/hygiene         ADDRESSED (node_modules ignored, scripts in tools/, CI added)
+IMPROVEMENTS (clear, small to medium; ordered by value for a personal podcast/radio app)
+=========================================================================================
+
+I1  Add subscription by name. "Add subscription" accepts only a URL. PodcastDiscoveryClient
+    already performs rate-limited Apple searches. If the input is not a URL, search
+    itunes.apple.com/search?entity=podcast and list the results with Subscribe. Also accept
+    podcasts.apple.com/…/id123 links via /lookup. This is the most common way people add
+    podcasts.
+
+I2  OPML import and export. Every other podcast app (AntennaPod, Pocket Casts, Podcast Addict,
+    Apple via third-party tools) exports OPML, and the Pod4Me web app already imports it. Keep
+    the text format as the default export.
+
+I3  Radio resilience: H1's reconnect, plus "Reconnecting…" status, M1's paused-capture cap,
+    L2/L3, and a "Test" button for custom URLs (fetch 2 s and show "MP3 128 kbps OK").
+
+I4  Faster, lighter refresh. Refresh fetches feeds one after another, each up to 3 minutes,
+    always re-downloading and re-parsing the full feed. Suggested changes:
+      - 4 concurrent fetches (Semaphore), with "Refreshing 12/40" in the progress bar;
+      - store ETag/Last-Modified per feed and send If-None-Match/If-Modified-Since; skip
+        parsing on 304 (schema 7, same migration as M3);
+      - persist permanent redirects (301/308) and <itunes:new-feed-url> as the feed's new URL,
+        so feeds survive publisher moves.
+
+I5  Sleep timer (15/30/45/60 min, end of episode). A few lines around player.pause() in the
+    service; the most-requested podcast player feature missing here.
+
+I6  Playback niceties:
+      - restart from the beginning when Play is pressed on an episode at ≥95% (currently resumes
+        in the last minute: Policy.resumePosition only resets at ≥100%);
+      - optional "skip silence" (ExoPlayer setSkipSilenceEnabled), global like speed;
+      - Mini-player for radio: offer Pause (keeps rewind) next to Stop. Stop currently wipes the
+        30-minute buffer, which is easy to do by accident now that rewind exists. This changes
+        a recorded UI decision, so ask first.
+
+I7  Backlog management in Latest. Every never-played episode shows "Unheard", and non-downloaded
+    episodes cannot be marked heard. Add "Mark heard" in Info for any episode and "Mark all older
+    as heard" per feed. Optionally add a "hide heard" toggle in Latest. This makes the
+    Heard/Unheard text informative.
+
+I8  Video: a fullscreen/landscape mode (the surface is only a 16:9 box inside the scrolling Player
+    column). Keep the Activity across rotation while video plays (handle orientation config
+    changes, or keep the surface outside the recreated Activity), which also removes L1(b).
+    Disable the video track when no surface is attached, to save decoding and, for streams,
+    some of the bandwidth.
+
+I9  Show more feed metadata cheaply: enclosure size (M3), and "last refreshed" time per feed (the
+    refresh marker exists; a timestamp column would make stale or failing feeds visible).
+
+I10 Station picker search: fold accents ("cherie" → "Chérie FM", "oui" → "OÜI FM"). FeedSearch
+    already has the normalization code.
+
+I11 Maintainability:
+      - ui/PodApp.kt is 995 lines with many 150-250-character lines. Split it per screen
+        (Library/Latest list, Feeds, Queue, Player, dialogs). The radio code already shows the
+        pattern.
+      - "unheard"/"heard"/"4ever" literals appear in ~10 places, and page names ("Library",
+        "Latest", …) are bare strings. Use constants or an enum.
+      - tools/build-apk.sh hard-codes versionCode/versionName (lines 34, 45-47). Read them from
+        aapt output or Gradle so a version bump is a one-file change.
+      - 34 lint warnings, mostly UseKtx (18). Fixing ModifierParameter/ObsoleteSdkInt is free;
+        the dependency notices go with the deferred upgrade review.
+      - The seeded sample feeds and YouTube channel (LibraryStore.kt:80-95, run on every
+        foreground start) were trial conveniences. Consider dropping the seeding once the trial
+        ends, so the production path has no hard-coded content.
+
+I12 Test gaps worth closing with the fixes above: upstream radio drop and recovery (playing and
+    paused); http→https redirect for video streaming; skip-on-error in a playlist; the L4 date
+    strings; multivariant HLS variant choice; .m3u/.pls wrappers.
+
+
+PROCESS AND DOCUMENTATION
+=========================
+D1  No device acceptance has been completed by an agent for any release. docs/device-checks.md
+    has checks 31–55 pending, including radio rewind (53), video and rotation (52), YouTube (54)
+    and the toolbar (55). The instrumented tests (Expat DTD rejection, feed-list format on ART)
+    have never been run. H1, M1 and L6 can only be confirmed on a phone. Suggested order: run
+    ./gradlew :app:connectedDebugAndroidTest once, then checks 53 and 52 with Wi-Fi switched off
+    mid-stream (this reproduces H1), then the rest.
+D2  docs/handover.md "Build, signing and delivery" still says the source and release script
+    target 1.0.12/code 20 (current: 1.0.20/code 28). The "Playback preferences" invariant omits
+    the `radio` key that PlaybackService now stores. The "Latest lint warnings" breakdown
+    predates the 18 UseKtx warnings.
+
+
+STATUS OF THE 2026-11-01 AUDIT (ANDROID ITEMS)
+----------------------------------------------
+Verified in the current code:
+  B2  field caps ................. FIXED   4,096-char titles, 1 MiB descriptions, marker kept
+  B3  Media RSS fallback ......... FIXED   audio and video media:content after enclosures
+  B9  shared duplicate ........... FIXED   exact audio_url match, otherwise "Shared episodes"
+  B10 busy drop .................. FIXED   network() now sets a "Please wait…" notice
+  B11 slashless link ............. FIXED   empty rawPath treated as "/" (Suggestions.kt:27)
+  B12 HTML download / protection . FIXED   HTML sniff at reconcile; error unloads and clears
+                                           activeEpisode (generalized further in M2)
+  B13 `changing` across suspend .. FIXED   markUnheard raises it only around the synchronous seek
+  B14 dates ...................... PARTLY  two-digit years and French months handled; L4 remains
+  B16 search scroll states ....... OPEN    deferred (L11)
+  S1 .............................. OPEN    excluded by user decision
+  S2 .............................. OPEN    deferred by user decision
+  S5 serve-apk ................... FIXED   only top-level .apk/.sha256, no listings or symlinks
+  S7 .............................. OPEN    INFO
+  D1 .............................. OPEN    see D1 above
+  Web/Worker items (B1, B4–B8, B15, S3, S4, S6): out of scope; see docs/v1-verification.md.
 
 
 SUGGESTED ORDER OF WORK
 -----------------------
-  1. S1  harden the signing key handling (no code change, no reinstall).
-  2. B1  move web Discover to direct Apple calls; redeploy; update web-app.md privacy note.
-  3. D1  one connected-test run on the S24, then device checks 41–45.
-  4. B4, B5, B6 (web/relay feed acceptance and the silent re-subscribe) — small, contained.
-  5. B2, B3, B9, B10, B11, B12 on Android in the next release, in that order.
-  6. S3 rate limit on /api/*; S5; the LOW/INFO rest as convenient.
+  1. H1 (+ M1, L9): radio reconnect, keep buffered audio, cap paused capture. Test with Wi-Fi
+     toggling on the S24.
+  2. H2: one-line data-source change plus a redirect test.
+  3. M2 skip-on-error, L7 wake mode, L6 radio audio type: small service changes, same release.
+  4. M3 + I4 + I9: one schema-7 migration (enclosure length, ETag/Last-Modified, last refresh).
+  5. L1: launch work once per foreground session; connect the player first.
+  6. I1 search-by-name and I2 OPML: the biggest usability gains.
+  7. I5 sleep timer, I6, I7, I8 as desired. L2–L5, L8, L10, L11 when convenient.

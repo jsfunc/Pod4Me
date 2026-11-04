@@ -1,6 +1,7 @@
 package com.pod4me.domain
 
-data class Feed(val id: String, val url: String, val name: String, val expiryDays: Int?, val defaults: Set<String> = emptySet(), val error: String? = null, val artworkUrl: String? = null, val subscribed: Boolean = true) {
+data class Feed(val id: String, val url: String, val name: String, val expiryDays: Int?, val defaults: Set<String> = emptySet(), val error: String? = null, val artworkUrl: String? = null, val subscribed: Boolean = true,
+    val etag: String? = null, val lastModified: String? = null, val lastRefreshed: Long? = null) {
     val isYouTube get() = YouTubeChannels.isYouTube(url)
 }
 data class Episode(
@@ -11,6 +12,7 @@ data class Episode(
     val downloadId: Long? = null, val error: String? = null, val lists: Set<String> = emptySet(), val managerId: Long? = null,
     val newInLastRefresh: Boolean = false,
     val isVideo: Boolean = false,
+    val byteSize: Long? = null,
 ) {
     val isDownloaded get() = path != null
     val progress get() = if (duration > 0) (position.toDouble() / duration).coerceIn(0.0, 1.0) else 0.0
@@ -49,4 +51,14 @@ fun List<Episode>.sorted(sort: TrackSort, library: Library): List<Episode> {
         TrackSort.PROGRESS -> compareBy<Episode> { it.progress }
     }
     return sortedWith(comparator.thenByDescending { it.published }.thenBy { it.id })
+}
+
+/** Shared by the list and its bulk-delete guard. Never matches an undownloaded episode. */
+fun Episode.matchesDownloadFilter(filter: String): Boolean = isDownloaded && when {
+    filter == "all" -> true
+    filter == "unheard" -> !heard
+    filter == "heard" -> heard
+    filter == "starred" -> stars > 0
+    filter.startsWith("feed:") -> feedId == filter.removePrefix("feed:")
+    else -> filter in lists
 }
