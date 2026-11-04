@@ -22,6 +22,23 @@ import org.robolectric.annotation.Config
 @Config(sdk = [35], application = PodApplication::class)
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class PlayerClientTest {
+    @Test fun countdownAdvancesLocallyWithoutNewSessionExtras() {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val engine = ExoPlayer.Builder(app).build()
+        val session = MediaSession.Builder(app, engine).build()
+        val deadline = android.os.SystemClock.elapsedRealtime() + 60_000
+        session.setSessionExtras(android.os.Bundle().apply { putLong(PlaybackService.SLEEP_DEADLINE, deadline) })
+        val client = PlayerClient(app) { MediaController.Builder(app, session.token).buildAsync() }
+        try {
+            client.connect(); shadowOf(Looper.getMainLooper()).idle(); client.refresh()
+            val before = client.state.value.sleepRemaining
+            org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(3))
+            client.refresh()
+            assertEquals(before - 3000, client.state.value.sleepRemaining)
+            assertEquals(deadline, session.sessionExtras.getLong(PlaybackService.SLEEP_DEADLINE))
+        } finally { client.disconnect(); session.release(); engine.release() }
+    }
+
     @Test fun rotationDetachesBeforeDisconnectAndReattachesWithoutResettingPlayback() {
         val app = RuntimeEnvironment.getApplication() as PodApplication
         val engine = ExoPlayer.Builder(app).build()

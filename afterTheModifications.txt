@@ -11,23 +11,45 @@ PARTIAL = part of the finding remains; NOT ADDRESSED; NEW = problem introduced b
 modifications; NEEDS PHONE = only a device test can settle it.
 
 
-OPEN ITEMS (as of round 1)
-==========================
-  N1  NEW     A station URL that never worked takes ~5 min 15 s to be declared unavailable,
-              and the final status says "Buffer kept" when nothing was buffered.
-  N2  NEW     Any podcast playback error, including audio-output errors, stamps the episode
-              "This download could not be played. Delete it and download it again.", and the
-              message is never cleared.
-  N3  NEW     Resume/Play at the end of a finished radio window (pause limit or station
-              unavailable) appears to do nothing. Code reading only.
-  N4  NEW     The "paused position has expired" notice is shown in the error dialog ("Could not
-              complete action").
-  H1  NEEDS PHONE  Recorder side fixed. The player's behaviour during a real outage is untested.
-  L4  PARTIAL French month abbreviations without the dot (janv, avr, juil) still give "Date
-              unknown".
-  L9  PARTIAL Initialization sections are cached; encryption keys are still fetched per segment.
+OPEN ITEMS (as of round 2, commit 36c976a, 1.0.22 / code 30)
+============================================================
+To fix before release
+  N5  MEDIUM  REGRESSION of H1. After a station has been captured, one HTTP 4xx (Icecast
+              "source not connected" 404, an expired HLS token 403, a segment 404) or one
+              captive-portal HTML page ends capture at once (UNAVAILABLE) instead of
+              reconnecting. Shown by probes Q1 and Q3.
+Small fixes
+  N6  LOW     Sleep timer: session extras are pushed every second, for the whole service
+              lifetime, even with no timer running, to every controller and to the platform
+              session (system UI, Bluetooth, Wear/Auto).
+  N7  LOW     Sleep timer: a timer that expires while paused, with the phone asleep, stops the next
+              headset/notification Play after about 1 s.
+  N8  LOW     Mark Unheard keeps the 3-day Heard deadline. An accidental Heard, such as a scrub
+              past 95%, still deletes the file 3 days later (probe Q6).
+  N9  LOW     The radio notice "paused position expired" permanently hides later "Reconnecting…"
+              and "Station unavailable" statuses (probe Q4).
+  N10 LOW     A feed that moves to the URL of a previously unsubscribed feed fails on every
+              refresh with "moved to an existing subscription" (probe Q5).
+  N11 LOW     Non-I/O podcast errors other than 5xxx (1xxx, 6xxx, 7xxx) are reported as "Audio
+              output was interrupted. Check your speaker or Bluetooth…".
+  N12 LOW     Security: an https→http permanent redirect or new-feed-url is persisted, so the
+              feed is then fetched in cleartext and can be moved again by a network attacker.
+Information and polish
+  N13 INFO    Several small issues; see Round 2: the specific radio failure reason is lost, a
+              URL without "https://" is searched as a name, OPML import is sequential with no
+              progress, the end-of-episode countdown ignores speed, single-feed refresh hides
+              earlier failures, OPML xmlUrl is case-sensitive, and validators must be reset
+              when the parser changes.
+Still open from earlier rounds
+  H1  NEEDS PHONE  The recorder is fixed, but see N5. Device test of a real outage still pending.
+  N3  FIXED as decided (replays the retained window from its start); NEEDS PHONE.
+  L9  PARTIAL by decision (keys not cached, to respect key rotation).
   L8, L10, L11  NOT ADDRESSED (performance and quality items, not bugs or security).
   S1, S2  Unchanged by user decision (2026-11-01).
+  Pending phone checks: sleep timer with the screen off and at the end of the queue,
+              fullscreen video (rotation, surface swap, gestures, TalkBack), and the radio
+              outage, pause limit and replay.
+Closed in round 2: N1, N2, N4, L4.
 
 
 ROUND 1 — 2026-11-04, 17:02 snapshot
@@ -215,3 +237,290 @@ All security and bug findings of audit.txt that were addressed pass their tests.
 L1–L3 and L5–L7 are verified in code and tests. H1 is fixed in the recorder but needs the
 Wi-Fi-off phone test. L4 and L9 are partial. Fix N1 before release, because it is a visible
 regression for custom stations. N2–N4 are small. Nothing here was tested on a phone.
+
+
+ROUND 2 — 2026-11-04, commit 36c976a
+====================================
+Code state tested
+-----------------
+  Commit 36c976a11f185150305cc73733cb0017a6a5130b, "Add sleep timer, search, refresh, backlog
+  and video improvements" (2026-11-04 20:36), on top of ccd3b10. Working tree clean. Version
+  1.0.22 / versionCode 30, SQLite schema 8 (migration_7_8.sql), backup format 2. The commit was
+  extracted with `git archive` into a scratch snapshot, and every check below ran on that copy.
+  This round covers the whole commit: the round-1 corrections as committed, the N1–N4
+  follow-ups, and the feature round:
+    - sleep timer;
+    - search by name / Apple link;
+    - parallel conditional refresh with moves;
+    - Heard only for downloads, and re-download resets to Unheard;
+    - delete all downloads of a list;
+    - 3-day Heard retention;
+    - fullscreen video;
+    - OPML / text import and export.
+  New source files: FeedRefresher, SubscriptionFormat, SleepTimerControl, FullscreenVideo and
+  SubscriptionDialog, plus 3 drawables. The documentation (handover, README, device-checks,
+  v1-verification) was read as committed.
+
+Executed
+--------
+  java tools/CoreTestLauncher.java ............ PASS, 138 core checks
+  python3 -I tools/check_schema.py ............ PASS, 11 schema/XML checks
+  ./gradlew :app:testDebugUnitTest :app:lintDebug --rerun-tasks --offline (fresh build)
+      unit tests ............................. PASS, 148 tests, 0 failures/errors/skips
+      debug lint ............................. 0 errors, 26 warnings
+  ./gradlew :app:lintRelease --offline ......... 0 errors, 26 warnings (offline).
+      The handover's 37 includes online dependency-version notices.
+      New-code warnings: 3 UseKtx (SubscriptionDialog:65, RadioBuffer:236/237) and
+      ModifierParameter on VideoSurface's new modifier parameter (default is not plain
+      Modifier).
+  Round-1 probes P1–P6, rerun unchanged against this commit. Their assertions encoded the old
+  behaviour and now fail, as expected:
+      P1 dead URL (404) ...................... 1 request, then UNAVAILABLE (was 25 / ~315 s)
+      P2 station web page .................... 1 request (was 25)
+      P3 .pls → file:///etc/passwd ........... still never requested (3 attempts, .pls only)
+      P4 dead station, no audio .............. "Could not play France Info. Check your
+                                               connection or the direct stream URL…"; station
+                                               unloaded
+      P5 replay at end of window ............. still inconclusive under Robolectric
+      P6 audio-output error 5001 ............. episode not stamped
+  New reviewer probes, AuditProbe2Test.kt, 6 Robolectric tests. They are kept only in the scratch
+  snapshot and NOT added to the repository:
+      Q1 audio captured, then one 404 ........ UNAVAILABLE after 2 requests (expected:
+                                               RECONNECTING then recovery)
+      Q2 audio captured, then portal HTML .... UNAVAILABLE after 2 requests
+      Q3 HLS, one segment 404 ................ UNAVAILABLE (3 segments, 2 polls)
+      Q4 radioStatus with notice set ......... notice shown for RECONNECTING and UNAVAILABLE
+      Q5 move to an unsubscribed feed URL .... "This feed moved to an existing subscription…"
+      Q6 Heard by 96% seek, then Unheard ..... expiry 30.0 d → 3.0 d → stays 3.0 d
+  javap on media3-session 1.8.0: MediaSessionImpl.setSessionExtras dispatches to every connected
+  controller and to MediaSessionLegacyStub's broadcast callback (the platform session). This
+  is used for N6.
+Not executed: release assembly/signing (the handover records a 1.0.22 build; not rebuilt
+here), instrumented tests, any phone. ADB lists no device.
+
+Verdicts on round-1 open items
+------------------------------
+N1  Dead station retried for 5 minutes ..................... FIXED
+    With no audio yet, capture stops after 3 attempts (about 3 s) or at once on a 4xx/HTML. The
+    service then unloads and reports the usual "Could not play…" message (P1, P2, P4; repo test
+    invalidStationStopsImmediately…). "Buffer kept" is shown only when radioHasAudio. The
+    fix is too broad, though: see N5.
+N2  Every podcast error blames the download ............... FIXED (see N11 for wording)
+    Only codes 2000–4999 stamp the episode. The stamp is cleared by clearPlaybackError when
+    the episode next plays (onIsPlayingChanged), and only if it is that exact message. Other
+    codes report "Audio output was interrupted…". P6 and a repo test confirm it.
+N3  Resume dead at end of finished window ................. FIXED as decided; NEEDS PHONE
+    Play, a headset or togglePlayback at STATE_ENDED seeks to 0 and replays the retained window.
+    The status line says "Buffer finished · Replay or Back to live", and the button reads
+    "Replay". The handover records that this deliberately keeps the "explicit Back to live"
+    rule instead of my implicit-reconnect suggestion. Accepted. Robolectric still cannot reach
+    READY (P5), so check 53 on the phone.
+N4  Informational notice in the error dialog ............... FIXED
+    It is now an inline status line (radioNotice), but see N9.
+H1  .......................................................... NEEDS PHONE; regressed by N5
+L4  French short months without the dot ................... FIXED
+    janv/févr/avr/juil/oct/nov get a dot added. CoreChecks covers janv, avr and juil.
+L9  ........................................................ PARTIAL by recorded decision
+    Keys are not cached, so same-URL key rotation keeps working.
+L8, L10, L11 ............................................... NOT ADDRESSED
+    These are listed for discussion in the handover. PodApp.kt grew from 995 to 1046 lines (I11).
+
+Review of the feature round
+---------------------------
+Sleep timer (I5) ............................................ WORKS, see N6, N7, N13d
+    The service owns an elapsedRealtime deadline. Expiry pauses and saves a podcast, or stops a
+    radio (buffer cleared). End-of-episode uses pauseAtEndOfMediaItems and cancels itself on
+    END_OF_MEDIA_ITEM or STATE_ENDED. Stop cancels the timer; switching to radio cancels End
+    mode. Validation: −1 / 0 / ≤120 min, an item must be loaded, and End mode is refused for
+    radio. The new command is registered only for the app's own package. The tests cover
+    set/cancel/End mode and radio expiry. Untested: real expiry with the screen off, which is
+    a phone check.
+Search by name / Apple link (I1) ............................ GOOD, see N13b
+    Search uses the shared rate-limited client (now behind a Mutex), with results deduplicated
+    by feedUrl (so no LazyColumn key collision). Artwork is validated as http(s). Apple links
+    go through lookup?id= and give a clear message when there is no public RSS. A title is
+    applied only to new subscriptions.
+Refresh (I4) ................................................ GOOD, see N10, N12, N13e/g
+    Four concurrent fetches, a progress counter in the header, failures isolated, and a Retry
+    dialog. Conditional GET: a 304 is accepted only when validators were sent. A cancellation
+    really cancels the blocking OkHttp call. applyRefresh commits only if the feed still has
+    the same URL and is still subscribed, so it cannot resubscribe or overwrite a changed
+    address. Validators are dropped when moving to a different resource. Only a 301/308 prefix
+    of the redirect chain is persisted.
+Backlog / Heard rules (I7, as decided) ...................... GOOD, see N8
+    Heard/Unheard is shown, settable and auto-set only for downloaded episodes. A successful
+    re-download resets to Unheard at position 0 and bumps the progress epoch, so in-flight saves
+    cannot resurrect the old position. Failed or cancelled downloads keep their history.
+3-day Heard retention, schema 8 ............................. GOOD
+    The migration is additive (3 nullable columns) and caps existing downloaded Heard
+    deadlines at upgrade + 3 days without extending earlier ones. 4ever/protected episodes also
+    get the cap, as at runtime. Protection is checked at deletion time, so this is harmless.
+    The 7→8 upgrade is tested.
+Delete all downloads (list/feed) ............................ GOOD
+    The IDs are snapshotted at confirmation. The filter, 4ever and active-episode checks are
+    repeated at execution. Per-file failures go into the episode error. Queue entries are
+    removed (clearDownload) and history/ratings/bookmarks are kept. The dialog text is
+    accurate.
+OPML / text (I2) ............................................ GOOD, see N13c/f
+    Bounded to 1 MiB, 1000 entries and depth 64. DTDs and external entities are rejected, which
+    closes XXE and billion-laughs. UTF-16 is accepted. The preview counts new / already /
+    invalid / duplicate entries. The OPML export is properly escaped (control characters
+    stripped, quotes and newlines escaped). YouTube channels are excluded from OPML and included
+    in Text, as decided.
+Fullscreen video (I8) ....................................... NO DEFECT FOUND ON READING; NEEDS PHONE
+    One TextureView on the same controller. The size is computed to fit without cropping. The
+    system bars are restored on dispose. Back exits. Fullscreen closes itself if the current
+    item is not a video. Controls auto-hide only while playing, and never under TalkBack or with
+    the timer dialog open. The "disable the video track without a surface" part of I8 is not
+    done (bandwidth/decoding only).
+Security (new surfaces) ..................................... NO REGRESSION, except N12 (LOW)
+    New SLEEP_TIMER command is restricted to the app's own package; the session extras carry
+    no personal data; the OPML parser is hardened; Apple lookup only uses the numeric ID; the
+    YouTube search query is URI-encoded; and new-feed-url / redirect targets are validated
+    http(s), without credentials and not YouTube. S1/S2 are unchanged by decision.
+
+New problems / further improvements
+-----------------------------------
+N5  MEDIUM  "Invalid station" is terminal even in the middle of a broadcast (regression of H1)
+    Where: RadioBuffer.kt:72 (`|| e is InvalidStation`), the request() 4xx mapping at line
+           168, and the HTML detection at line 110.
+    What:  N1's fast-fail is meant for a station that never worked. It also applies after
+           hours of good capture. Situations it ends capture in:
+             - Icecast/Shoutcast return 404 while the studio encoder reconnects (common
+               during station maintenance);
+             - hotel/train Wi-Fi portals answer with an HTML page (the very scenario H1 was
+               about);
+             - CDNs return 404/410 for an HLS segment that lags or has rotated out, or 403
+               when a URL token expires (the outer loop would re-fetch the master playlist
+               and get a fresh token).
+           Probes Q1/Q2/Q3: UNAVAILABLE after one such response, with 23 retries unused. The
+           buffer is kept, but the user must notice and press Back to live.
+    Fix:   Treat InvalidStation as terminal only while !window.hasAudio. Otherwise count it as
+           an ordinary retry: `if (++attempts > limit || (e is InvalidStation &&
+           !window.hasAudio))`. For HLS, a 404/410 on a single segment could also skip that
+           segment (gap → discontinuity) instead of aborting the playlist. Add tests:
+           audio → 404 → audio recovers; audio → HTML → recovers; one segment 404 → capture
+           continues.
+
+N6  LOW     Session extras are rebroadcast every second, forever
+    Where: PlaybackService.onCreate, the `while (isActive) { delay(1000); … publishExtras() }`
+           loop.
+    What:  The loop runs for the service's whole life, playing or not, with or without a
+           timer. Each iteration takes the operations lock and calls setSessionExtras. In Media3
+           1.8 (javap) that is sent to every connected controller and to the platform session.
+           So system UI, Bluetooth and any Wear/Auto controller receive an extras-changed IPC
+           every second, which costs battery and adds binder churn. The app UI does not need
+           it: MainActivity already polls PlayerClient.refresh() every 500 ms.
+    Fix:   Publish an absolute SLEEP_DEADLINE (elapsedRealtime is device-wide, so the UI can
+           compute what remains) once when the timer is set or changed. Publish extras only
+           when a value changes. Replace the loop with one job that is scheduled with
+           delay(deadline − now) and cancelled with the timer.
+
+N7  LOW     A timer that expires while paused, with the phone asleep, stops the next resume
+    Where: checkSleepTimer, the 1-s loop, and togglePlayback's `if (checkSleepTimer()) return`.
+    What:  Example: a 60-min timer, a headset pause at minute 20, then the screen goes off.
+           While paused ExoPlayer holds no wake lock, so the main-looper delay is frozen in
+           deep sleep and the timer never fires. The next morning a headset or notification
+           Play resumes playback; within ≤1 s the loop sees the expired deadline and pauses
+           again. Through the app's own button, togglePlayback swallows the first press
+           instead. Code reading only; Robolectric cannot model deep sleep.
+    Fix:   When the deadline is found to have passed while the player was not playing, cancel
+           the timer silently, without pausing, and let the Play go through. Alternatively,
+           count only playing time (a product choice; the handover says pauses do not reset
+           the timer, which this keeps).
+
+N8  LOW     Mark Unheard does not undo the 3-day Heard deadline
+    Where: LibraryStore.setHeard (sets expiry on Heard; on Unheard only resets the position).
+    What:  Heard is also set automatically by seeking past 95%. With the 3-day rule, a
+           download marked Heard by mistake is deleted 3 days later even after the user marks
+           it Unheard (probe Q6: 30.0 → 3.0 → 3.0 days). The Info screen shows the date, but
+           nothing hints that Unheard leaves it unchanged.
+    Fix:   On Heard→Unheard of a downloaded episode, restore
+           Policy.downloadExpiry(downloaded, feed.expiry_days). Use the original download time,
+           so this cannot extend a file indefinitely. Needs a product confirmation; record it in
+           the handover.
+
+N9  LOW     An old radio notice hides later statuses
+    Where: RadioScreen.radioStatus (the radioNotice branch comes before PAUSE_LIMIT,
+           UNAVAILABLE and RECONNECTING); PlaybackService clears radioNotice only on
+           goLive/startRadio/close.
+    What:  After "The paused position expired…", later outages still show that notice instead
+           of "Reconnecting…" or "Station unavailable" (probe Q4), for as long as the station
+           stays loaded.
+    Fix:   Put the notice after the buffer-status branches, or clear radioNotice on the next
+           RadioBuffer status change, or after about 10 s of playback.
+
+N10 LOW     A move to a previously unsubscribed feed fails forever, with a misleading message
+    Where: LibraryStore.applyRefresh (the duplicate check covers all feeds rows, including
+           subscribed=0).
+    What:  Unsubscribed feeds keep their row and URL. If feed A permanently moves to B and the
+           user once unsubscribed from B, every refresh of A fails with "This feed moved to an
+           existing subscription. Review both subscriptions…". There is no B subscription to
+           review (probe Q5), and A goes into the failed-feeds dialog on every refresh.
+    Fix:   Say "…to a feed you previously unsubscribed from (B)". Offer, or simply do, the
+           rename: keep A's id, history and settings, and move B's leftover episodes/history
+           only if B has any. Alternatively keep A's URL and stop reporting the move as a
+           refresh failure.
+
+N11 LOW     Wrong wording for some non-file podcast errors
+    Where: PlaybackService.recoverPlaybackError, the final handlePlaybackError message.
+    What:  Every code outside 2000–4999 gets "Audio output was interrupted. Check your speaker or
+           Bluetooth connection…". That fits 5xxx (audio sink) only. It is wrong for:
+             - 1000 unspecified, 1003 timeout, 1004 failed runtime check;
+             - 6xxx DRM;
+             - 7xxx video frame processing (a downloaded video episode).
+    Fix:   Use the output wording for 5000–5999 only, and a neutral "Playback stopped
+           unexpectedly. Tap Play to retry." otherwise.
+
+N12 LOW (security)  A feed can be permanently downgraded from HTTPS to HTTP
+    Where: FeedClient.permanentRedirect and LibraryStore.applyRefresh (new-feed-url).
+    What:  OkHttp follows https→http redirects, and cleartext is allowed (S2). A misconfigured
+           host's 301 https→http, or a new-feed-url with http://, is stored permanently. Every
+           later refresh then runs in cleartext, where a network attacker can rewrite the feed,
+           including its new-feed-url, and move the subscription to a feed of their choice.
+    Fix:   Refuse to persist a move that changes https to http. Keep the old URL and still use
+           the fetched content.
+
+N13 INFO / polish
+    a) The specific radio failure reason is lost: "Use the station's direct audio URL, not its
+       web page" and "Radio server returned HTTP 403" stay inside RadioWindow.fail. The user sees
+       the generic "Could not play X…". Pass the buffer's last failure message to
+       handlePlaybackError for the no-audio case. This fits custom-station setup, together with
+       the I3 "Test" button idea.
+    b) SubscriptionDialog treats input without "://" as a name search.
+       "feeds.example.com/podcast.xml" or "podcasts.apple.com/fr/podcast/x/id123" pasted
+       without a scheme is therefore searched instead of subscribed. Treat dotted, space-free
+       input containing "/" as https://….
+    c) confirmImport subscribes strictly one feed at a time. Each fetch can take up to the
+       3-minute call timeout, so 100–1000 entries can block the app (busy) for a long time with
+       no progress. Reuse FeedRefresher-style 4-way concurrency and the header counter
+       ("Importing 12/80").
+    d) The End-of-episode countdown shows media time (duration − position), not wall-clock time.
+       At 2× it overstates the remaining time by half. Divide by the playback speed.
+    e) refresh(feed) for a single feed replaces failedIds, which silently drops the list from an
+       earlier full refresh. Merge the lists, or keep single-feed refresh out of the dialog.
+    f) The OPML importer reads only the exact attribute "xmlUrl". A few exporters write "xmlurl"
+       or "url" (type="link"). Accept these case-insensitively.
+    g) Conditional GET means unchanged feeds are no longer re-parsed. When a future release
+       changes FeedParser output (as schema 7 did for byte_size), its migration must clear
+       feeds.etag/last_modified, or the new fields never appear for quiet feeds. Add this to the
+       handover's regression traps.
+    h) Not done and listed as remaining discussion:
+         - show the stored last_refreshed (I9);
+         - skip silence (I6);
+         - accent folding in the station picker (I10);
+         - disable the video track without a surface (I8);
+         - split PodApp.kt (I11).
+
+Round 2 conclusion
+------------------
+The round-1 corrections are committed and verified: N1, N2, N4 and L4 are closed, and N3 is
+closed as the user decided. The six features are carefully implemented: bounded inputs,
+race-safe store commits, hardened OPML, own-package commands, and data-preserving schema 8.
+They pass 138 core, 11 schema and 148 unit tests, with lint at 0 errors. One real regression
+needs fixing before this version goes on the phone: N5. N1's fast-fail also applies after
+capture has started, so ordinary mid-broadcast hiccups (Icecast 404, captive portal, segment
+404/403) end recording instead of reconnecting. That reopens much of H1. N6–N12 are small, and
+N8/N10 involve a product decision. Nothing in this round was tested on a phone. The pending
+device checks (radio outage/pause limit/replay, sleep timer with the screen off, fullscreen
+video) remain open.

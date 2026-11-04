@@ -104,11 +104,12 @@ class AppModel(application: Application) : AndroidViewModel(application) {
     fun retryRefresh() = refreshFeeds(library.value.subscriptions.filter { it.id in mutableRefresh.value.failedIds })
     fun dismissRefreshFailures() { mutableRefresh.value = mutableRefresh.value.copy(failedIds = emptyList()) }
     private fun refreshFeeds(targets: List<Feed>) = network {
+        val previousFailures = mutableRefresh.value.failedIds
         val refresher = com.pod4me.data.FeedRefresher(app.feeds::refresh,
             { feed, response -> store.applyRefresh(feed, response) }, { feed, message -> store.feedError(feed.id, message) })
         try {
             val failed = refresher.refresh(targets) { done, total -> mutableRefresh.value = RefreshUi(done, total, true) }
-            mutableRefresh.value = mutableRefresh.value.copy(running = false, failedIds = failed.map { it.id })
+            mutableRefresh.value = mutableRefresh.value.copy(running = false, failedIds = remainingRefreshFailures(previousFailures, targets.map { it.id }, failed.map { it.id }, library.value.subscriptions.map { it.id }))
         } finally { mutableRefresh.value = mutableRefresh.value.copy(running = false) }
     }
     fun subscribe(url: String) = network { subscribeNow(url); mutableNotice.value = "Subscription added" }
@@ -221,6 +222,16 @@ class AppModel(application: Application) : AndroidViewModel(application) {
         action { try { block() } finally { mutableBusy.value = false } }
     }
     companion object {
+        internal fun remainingRefreshFailures(previous: List<String>, attempted: List<String>, failed: List<String>, subscribed: List<String>): List<String> =
+            ((previous - attempted.toSet()) + failed).distinct().filter { it in subscribed }
+        internal fun subscriptionUrl(input: String): String? {
+            val value = input.trim()
+            if (value.contains("://")) return value
+            if (value.any(Char::isWhitespace) || '/' !in value) return null
+            val candidate = "https://$value"
+            val host = runCatching { java.net.URI(candidate).host }.getOrNull() ?: return null
+            return candidate.takeIf { '.' in host }
+        }
         internal fun previewImport(entries: List<SubscriptionFormat.Entry>, subscribed: Set<String>): ImportPreview {
             val pending = linkedMapOf<String, SubscriptionFormat.Entry>()
             val seen = mutableSetOf<String>()

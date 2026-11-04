@@ -65,7 +65,7 @@ class PlayerClient internal constructor(
             p.currentMediaItem?.mediaMetadata?.title?.toString().takeIf { live },
             p.videoSize.let { if (it.width > 0 && it.height > 0) it.width * it.pixelWidthHeightRatio / it.height else 16f / 9f }, p.isCurrentMediaItemSeekable, p.currentLiveOffset.coerceAtLeast(0), p.sessionExtras.getString(PlaybackService.RADIO_STATUS),
             p.sessionExtras.getBoolean(PlaybackService.RADIO_HAS_AUDIO), p.sessionExtras.getString(PlaybackService.RADIO_NOTICE),
-            p.playbackState == Player.STATE_ENDED, p.sessionExtras.getLong(PlaybackService.SLEEP_REMAINING, -1), p.sessionExtras.getBoolean(PlaybackService.SLEEP_END))
+            p.playbackState == Player.STATE_ENDED, p.sessionExtras.getLong(PlaybackService.SLEEP_DEADLINE, -1).let { if (it < 0) -1 else (it - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0) }, p.sessionExtras.getBoolean(PlaybackService.SLEEP_END))
     }
     fun play(id: String, order: List<String>, position: Long = -1) {
         val args = Bundle().apply { putString("id", id); putStringArrayList("order", ArrayList(order)); putLong("position", position) }

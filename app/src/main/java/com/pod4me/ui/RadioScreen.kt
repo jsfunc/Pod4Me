@@ -233,11 +233,11 @@ fun LivePlayer(playback: PlaybackUi, model: AppModel) {
 }
 
 internal fun radioStatus(playback: PlaybackUi): String = when {
-    playback.ended -> "Buffer finished · Replay or Back to live"
-    playback.radioNotice != null -> playback.radioNotice
     playback.radioStatus == "PAUSE_LIMIT" -> "Capture stopped after 30 min paused · Back to live reconnects"
     playback.radioStatus == "UNAVAILABLE" -> if (playback.radioHasAudio) "Station unavailable · Buffer kept · Back to live retries" else "Station unavailable · Back to live retries"
     playback.radioStatus == "RECONNECTING" -> "Reconnecting…"
+    playback.ended -> "Buffer finished · Replay or Back to live"
+    playback.radioNotice != null -> playback.radioNotice
     playback.buffering -> "Buffering…"
     !playback.playing -> "Paused"
     playback.liveOffset <= 8000 -> "Live"

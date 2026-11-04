@@ -27,16 +27,16 @@ internal fun SubscriptionDialog(model: AppModel, onDismiss: () -> Unit) {
     val library by model.library.collectAsStateWithLifecycle()
     val busy by model.busy.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    val url = input.trim().contains("://")
+    val url = AppModel.subscriptionUrl(input)
     fun submit() {
         if (busy || input.isBlank()) return
-        if (url) { model.subscribe(input.trim()); onDismiss() }
+        if (url != null) { model.subscribe(url); onDismiss() }
         else model.searchSubscriptions(input.trim())
     }
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Add subscription") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(input, { input = it.take(4096) }, label = { Text("Podcast name or URL") }, singleLine = true,
-                keyboardOptions = KeyboardOptions(imeAction = if (url) ImeAction.Go else ImeAction.Search),
+                keyboardOptions = KeyboardOptions(imeAction = if (url != null) ImeAction.Go else ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { submit() }, onGo = { submit() }))
             if (search.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
             search.message?.let { Text(it) }
@@ -65,6 +65,6 @@ internal fun SubscriptionDialog(model: AppModel, onDismiss: () -> Unit) {
                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=${Uri.encode(input.trim())}")))
             } }) { Text("Search on YouTube ↗") }
         }
-    }, confirmButton = { TextButton(enabled = !busy && input.isNotBlank(), onClick = ::submit) { Text(if (url) "Subscribe" else "Search") } },
+    }, confirmButton = { TextButton(enabled = !busy && input.isNotBlank(), onClick = ::submit) { Text(if (url != null) "Subscribe" else "Search") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } })
 }

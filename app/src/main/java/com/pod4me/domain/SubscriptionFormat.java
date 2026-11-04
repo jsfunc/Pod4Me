@@ -56,7 +56,9 @@ public final class SubscriptionFormat {
                 if (depth == 1 && !local.equals("opml")) throw new SAXException("Choose an OPML or text subscription list");
                 if (depth == 2 && local.equals("body")) bodyDepth = depth;
                 if (bodyDepth > 0 && local.equals("outline")) {
-                    String url = attributes.getValue("xmlUrl");
+                    String url = attribute(attributes, "xmlUrl");
+                    String type = attribute(attributes, "type");
+                    if (url == null && ("rss".equalsIgnoreCase(type) || "link".equalsIgnoreCase(type))) url = attribute(attributes, "url");
                     if (url != null) {
                         String title = attributes.getValue("title");
                         if (title == null || title.isBlank()) title = attributes.getValue("text");
@@ -83,6 +85,11 @@ public final class SubscriptionFormat {
         for (Entry feed : feeds) xml.append("  <outline type=\"rss\" text=\"").append(escape(feed.title()))
             .append("\" title=\"").append(escape(feed.title())).append("\" xmlUrl=\"").append(escape(feed.url())).append("\"/>\n");
         return xml.append("</body></opml>\n").toString();
+    }
+    private static String attribute(Attributes attributes, String name) {
+        for (int i = 0; i < attributes.getLength(); i++)
+            if (name.equalsIgnoreCase(attributes.getLocalName(i))) return attributes.getValue(i);
+        return null;
     }
     private static Entry entry(String url, String title) {
         if (url.length() > 65536) throw new IllegalArgumentException("A subscription URL is too long");

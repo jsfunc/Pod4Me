@@ -20,6 +20,48 @@ import java.io.File
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = Application::class)
 class LibraryStoreTest {
+    @Test fun moveToUnsubscribedAddressRefreshesWithoutMergingEitherHistory() = runBlocking {
+        val original = store.library.value.subscriptions.single()
+        val targetData = FeedParser.Feed("Old destination", listOf(FeedParser.Item("target", "Target episode", "https://example.com/target.mp3", "", 2, 10000)))
+        val targetId = store.saveFeed("https://example.com/target", targetData)
+        val targetEpisode = store.library.value.episodes.single { it.feedId == targetId }
+        store.progress(targetEpisode.id, 1234, 10000); store.rate(targetEpisode.id, 5)
+        store.unsubscribe(targetId)
+        val retained = store.library.value.episode(targetEpisode.id)
+        store.feedError(original.id, "Earlier failure")
+        store.applyRefresh(original, com.pod4me.data.FeedResponse(targetData, "target-tag", null, "https://example.com/target"), 200)
+        val refreshed = store.library.value.subscriptions.single()
+        assertEquals(original.url, refreshed.url); assertEquals(original.id, refreshed.id); assertNull(refreshed.error)
+        assertEquals(200L, refreshed.lastRefreshed)
+        assertEquals(retained, store.library.value.episode(targetEpisode.id))
+        assertFalse(store.library.value.feeds.single { it.id == targetId }.subscribed)
+        assertTrue(store.library.value.episodes.any { it.feedId == original.id && it.title == "Target episode" })
+        assertTrue(store.library.value.episode(episode.id)!!.isDownloaded)
+    }
+
+    @Test fun markingUnheardIntentionallyKeepsTheShortenedHeardDeadline() = runBlocking {
+        val now = System.currentTimeMillis()
+        helper.writableDatabase.execSQL("UPDATE episodes SET downloaded=?,expiry=? WHERE id=?", arrayOf(now, now + 30 * Policy.DAY, episode.id))
+        store.initialize()
+        store.progress(episode.id, 9600, 10000)
+        val shortened = store.library.value.episode(episode.id)!!.expiry
+        assertTrue(shortened!! <= System.currentTimeMillis() + 3 * Policy.DAY)
+        store.membership(episode.id, "unheard", true)
+        val reset = store.library.value.episode(episode.id)!!
+        assertFalse(reset.heard); assertEquals(0L, reset.position); assertEquals(shortened, reset.expiry)
+    }
+
+    @Test fun secureFeedNeverPersistsCleartextRedirectOrPublisherMove() = runBlocking {
+        val original = store.library.value.subscriptions.single()
+        for (directive in listOf(false, true)) {
+            val data = FeedParser.Feed("Feed", listOf(FeedParser.Item("extra-$directive", "New", "https://example.com/new.mp3", "", 1, 0)), "", 0,
+                if (directive) "http://example.com/insecure" else "")
+            store.applyRefresh(original, com.pod4me.data.FeedResponse(data, "v1", null, if (directive) null else "http://example.com/insecure"))
+            assertEquals(original.url, store.library.value.subscriptions.single().url)
+            assertTrue(store.library.value.episodes.any { it.title == "New" })
+        }
+    }
+
     @Test fun refreshValidatorsAndMovesPreserveHistoryAndRejectConflicts() = runBlocking {
         val original = store.library.value.subscriptions.single()
         store.editFeed(original.id, "My name", 8, emptySet())

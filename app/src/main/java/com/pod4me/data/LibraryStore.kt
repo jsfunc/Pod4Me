@@ -161,11 +161,16 @@ class LibraryStore(private val context: Context) : AutoCloseable {
     suspend fun applyRefresh(feed: Feed, response: FeedResponse, now: Long = System.currentTimeMillis()) = write { db ->
         val current = db.rows("SELECT url,subscribed FROM feeds WHERE id=?", feed.id) { it.str("url") to it.long("subscribed") }.firstOrNull()
         if (current != (feed.url to 1L)) return@write
-        val destination = response.parsed?.newFeedUrl()?.takeIf(String::isNotBlank) ?: response.permanentUrl ?: feed.url
-        FeedParser.httpUrl(destination)
-        require(!YouTubeChannels.isYouTube(destination)) { "A podcast feed cannot move to a YouTube channel" }
-        val duplicate = db.rows("SELECT id FROM feeds WHERE url=? AND id<>?", destination, feed.id) { it.str("id") }.isNotEmpty()
-        check(!duplicate) { "This feed moved to an existing subscription. Review both subscriptions before merging: $destination" }
+        val proposed = response.parsed?.newFeedUrl()?.takeIf(String::isNotBlank) ?: response.permanentUrl ?: feed.url
+        // Continue reading a publisher's response, but never make a secure subscription permanently cleartext.
+        val safeDestination = if (java.net.URI(feed.url).scheme.equals("https", true) &&
+            java.net.URI(proposed).scheme.equals("http", true)) feed.url else proposed
+        FeedParser.httpUrl(safeDestination)
+        require(!YouTubeChannels.isYouTube(safeDestination)) { "A podcast feed cannot move to a YouTube channel" }
+        val duplicate = db.rows("SELECT subscribed FROM feeds WHERE url=? AND id<>?", safeDestination, feed.id) { it.long("subscribed") == 1L }.firstOrNull()
+        check(duplicate != true) { "This feed moved to an existing subscription. Review both subscriptions before merging: $safeDestination" }
+        // An unsubscribed row may still own downloads/history. Keep both identities intact.
+        val destination = if (duplicate == false) feed.url else safeDestination
         if (response.parsed != null) saveFeed(db, feed.url, response.parsed, feed.id)
         else {
             db.update("episodes", values("new_in_last_refresh" to 0), "feed_id=? AND new_in_last_refresh=1", arrayOf(feed.id))

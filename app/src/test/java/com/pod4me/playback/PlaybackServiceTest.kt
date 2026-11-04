@@ -16,11 +16,73 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.RobolectricTestRunner
 import java.io.File
+import okhttp3.ResponseBody.Companion.toResponseBody
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = PodApplication::class)
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class PlaybackServiceTest {
+    @Test fun immediateStationFailureFinishesSetupThenReportsItsReasonWithoutPartialPlayer() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val controller = service(app)
+        controller.get().createRadioBuffer = { station ->
+            val http = okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+                okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(404).message("Not Found").body(ByteArray(0).toResponseBody()).build()
+            }.build()
+            RadioBuffer(app.cacheDir, station.url, http).also { buffer ->
+                val deadline = System.nanoTime() + 2_000_000_000L
+                while (buffer.status.value != RadioBuffer.Status.UNAVAILABLE && System.nanoTime() < deadline) Thread.sleep(5)
+                assertEquals(RadioBuffer.Status.UNAVAILABLE, buffer.status.value)
+            }
+        }
+        try {
+            controller.get().startRadio(app.radios.read().first().id, play = false)
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(0, player(controller.get()).mediaItemCount)
+            assertTrue(app.error.value!!.contains("HTTP 404"))
+        } finally { controller.destroy() }
+    }
+
+    @Test fun expiredTimerDoesNotSwallowAppOrHeadsetResumeAfterPause() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val episodes = queuedEpisodes(app)
+        val controller = service(app)
+        try {
+            val service = controller.get()
+            service.startEpisode(episodes.first().id, episodes.map { it.id }, 1000, play = false)
+            fun expireWhileAsleep() {
+                service.setSleepTimer(60_000)
+                PlaybackService::class.java.getDeclaredField("sleepDeadline").apply { isAccessible = true }
+                    .set(service, android.os.SystemClock.elapsedRealtime() - 1)
+            }
+            expireWhileAsleep()
+            service.togglePlayback()
+            assertTrue(player(service).playWhenReady)
+            assertFalse(service.checkSleepTimer(Long.MAX_VALUE))
+            player(service).pause()
+            expireWhileAsleep()
+            player(service).play() // Notification/headset uses the ordinary player command.
+            assertTrue(player(service).playWhenReady)
+            assertFalse(service.checkSleepTimer(Long.MAX_VALUE))
+        } finally { controller.destroy() }
+    }
+
+    @Test fun nonFileErrorsUseSpecificOutputOrNeutralWording() = runBlocking {
+        val app = RuntimeEnvironment.getApplication() as PodApplication
+        val episodes = queuedEpisodes(app)
+        val controller = service(app)
+        try {
+            for (code in listOf(1000, 1003, 5001, 6001, 7000)) {
+                controller.get().startEpisode(episodes.first().id, episodes.map { it.id }, 0, play = false)
+                controller.get().recoverPlaybackError(code)
+                assertNull(app.store.library.value.episode(episodes.first().id)!!.error)
+                assertTrue(app.error.value!!.contains(if (code == 5001) "Bluetooth" else "unexpectedly"))
+                app.clearError()
+            }
+        } finally { controller.destroy() }
+    }
+
     @Test fun timerPausesPodcastKeepsPositionAndSurvivesTrackChangesAndManualPauses() = runBlocking {
         val app = RuntimeEnvironment.getApplication() as PodApplication
         val episodes = queuedEpisodes(app)

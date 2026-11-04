@@ -51,6 +51,9 @@ class PlaybackService : MediaSessionService() {
     private val failedItems = mutableSetOf<String>()
     private var radioStatusJob: Job? = null
     private var sleepDeadline: Long? = null
+    private var sleepJob: Job? = null
+    private data class Extras(val radioStatus: String?, val hasAudio: Boolean, val notice: String?, val deadline: Long?, val episodeEnd: Boolean)
+    private var publishedExtras: Extras? = null
     private var sleepAtEpisodeEnd = false
     private var radioNotice: String? = null
     private val pauseWakeLock by lazy { getSystemService(PowerManager::class.java)
@@ -101,6 +104,8 @@ class PlaybackService : MediaSessionService() {
                 scope.launch { safely { operations.withLock { store.removeFromQueue(id); rebuildUpcoming() } } }
             }
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                // A deliberate resume after sleeping past a paused timer starts normally.
+                if (playWhenReady) clearExpiredTimerOnResume()
                 if (sleepAtEpisodeEnd && !playWhenReady && reason == Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM) {
                     cancelSleepTimer()
                 }
@@ -232,10 +237,6 @@ class PlaybackService : MediaSessionService() {
         scope.launch {
             while (isActive) { delay(5_000); if (player.isPlaying) operations.withLock { saveProgressNow() } }
         }
-        scope.launch { while (isActive) {
-            delay(1000)
-            safely { operations.withLock { checkSleepTimer(); publishExtras() } }
-        } }
         // Keep a cold session unloaded. Resumption loads the saved item only on Play,
         // so simply opening the app cannot protect an expired file from deletion.
     }
@@ -246,12 +247,18 @@ class PlaybackService : MediaSessionService() {
         if (durationMs == -1L) { cancelSleepTimer(); return }
         require(player.currentMediaItem != null) { "Start an episode or radio first" }
         require(durationMs != 0L || liveStation == null) { "Live radio has no episode end" }
+        sleepJob?.cancel(); sleepJob = null
         sleepAtEpisodeEnd = durationMs == 0L
         sleepDeadline = durationMs.takeIf { it > 0 }?.let { SystemClock.elapsedRealtime() + it }
         player.pauseAtEndOfMediaItems = sleepAtEpisodeEnd
+        sleepDeadline?.let { deadline -> sleepJob = scope.launch {
+            delay((deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+            safely { operations.withLock { sleepJob = null; checkSleepTimer() } }
+        } }
         publishExtras()
     }
     private fun cancelSleepTimer() {
+        sleepJob?.cancel(); sleepJob = null
         sleepDeadline = null; sleepAtEpisodeEnd = false
         player.pauseAtEndOfMediaItems = false
         publishExtras()
@@ -263,12 +270,20 @@ class PlaybackService : MediaSessionService() {
         else { player.pause(); saveProgressNow() }
         return true
     }
+    private fun clearExpiredTimerOnResume() {
+        if (sleepDeadline?.let { SystemClock.elapsedRealtime() >= it } == true) cancelSleepTimer()
+    }
     private fun publishExtras() {
-        session?.setSessionExtras(Bundle().apply {
-            radioBuffer?.let { putString(RADIO_STATUS, it.status.value.name); putBoolean(RADIO_HAS_AUDIO, it.window.hasAudio) }
-            putString(RADIO_NOTICE, radioNotice)
-            putBoolean(SLEEP_END, sleepAtEpisodeEnd)
-            putLong(SLEEP_REMAINING, sleepDeadline?.let { (it - SystemClock.elapsedRealtime()).coerceAtLeast(0) } ?: -1L)
+        val current = Extras(radioBuffer?.status?.value?.name, radioBuffer?.window?.hasAudio == true,
+            radioNotice, sleepDeadline, sleepAtEpisodeEnd)
+        val activeSession = session ?: return
+        if (current == publishedExtras) return
+        publishedExtras = current
+        activeSession.setSessionExtras(Bundle().apply {
+            putString(RADIO_STATUS, current.radioStatus); putBoolean(RADIO_HAS_AUDIO, current.hasAudio)
+            putString(RADIO_NOTICE, current.notice)
+            putBoolean(SLEEP_END, current.episodeEnd)
+            putLong(SLEEP_DEADLINE, current.deadline ?: -1L)
         })
     }
 
@@ -278,7 +293,7 @@ class PlaybackService : MediaSessionService() {
             // Re-prepare the same local source/position, including a finished retained window.
             if (radioBuffer?.window?.hasAudio == true || radioBuffer?.status?.value == RadioBuffer.Status.CAPTURING ||
                 radioBuffer?.status?.value == RadioBuffer.Status.RECONNECTING) player.prepare()
-            else handlePlaybackError()
+            else handlePlaybackError(radioFailureMessage())
             return
         }
         val id = player.currentMediaItem?.mediaId
@@ -297,8 +312,11 @@ class PlaybackService : MediaSessionService() {
                 }
             }
         }
-        handlePlaybackError(if (liveStation == null && !streamingVideo && code !in 2000..4999)
-            "Audio output was interrupted. Check your speaker or Bluetooth connection and tap Play to retry." else null)
+        handlePlaybackError(when {
+            code in 5000..5999 -> "Audio output was interrupted. Check your speaker or Bluetooth connection and tap Play to retry."
+            code !in 2000..4999 -> "Playback stopped unexpectedly. Tap Play to retry."
+            else -> null
+        })
     }
 
     private fun setRadioAudio(radio: Boolean) {
@@ -325,6 +343,9 @@ class PlaybackService : MediaSessionService() {
         publishExtras()
     }
 
+    private fun radioFailureMessage(): String? = radioBuffer?.lastFailure?.let {
+        "Could not play ${liveStation?.name ?: "this radio"}: $it. Check the connection or direct stream URL and tap Play to retry."
+    }
     internal fun handlePlaybackError(message: String? = null) {
         val failedStation = liveStation
         val failedStream = streamingVideo
@@ -409,12 +430,16 @@ class PlaybackService : MediaSessionService() {
         val buffer = createRadioBuffer(station)
         radioBuffer = buffer
         radioStatusJob = scope.launch {
-            buffer.status.collect { status ->
+            // An immediate HTTP failure must not tear down a player that is still being configured.
+            yield()
+            buffer.status.collect { status -> safely { operations.withLock {
+                if (radioBuffer !== buffer) return@withLock
+                radioNotice = null
                 publishExtras()
                 if (status == RadioBuffer.Status.UNAVAILABLE && !buffer.window.hasAudio && liveStation?.id == station.id) {
-                    handlePlaybackError()
+                    handlePlaybackError(radioFailureMessage())
                 } else updateRadioPause()
-            }
+            } } }
         }
     }
     private fun radioItem(station: RadioStation) = MediaItem.Builder().setMediaId(station.id).setUri(requireNotNull(radioBuffer).uri)
@@ -487,6 +512,7 @@ class PlaybackService : MediaSessionService() {
     }
 
     internal suspend fun togglePlayback() {
+        if (!player.playWhenReady || player.playbackState == Player.STATE_ENDED) clearExpiredTimerOnResume()
         if (checkSleepTimer()) return
         if (player.playWhenReady && player.playbackState != Player.STATE_ENDED && player.playerError == null) {
             player.pause()
@@ -648,7 +674,7 @@ class PlaybackService : MediaSessionService() {
         internal fun videoHttpFactory() = DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true).setUserAgent("Pod4Me/${BuildConfig.VERSION_NAME}")
         const val SLEEP_TIMER = "com.pod4me.SLEEP_TIMER"
-        const val SLEEP_REMAINING = "sleep_remaining"
+        const val SLEEP_DEADLINE = "sleep_deadline"
         const val SLEEP_END = "sleep_end"
         const val RADIO_HAS_AUDIO = "radio_has_audio"
         const val RADIO_NOTICE = "radio_notice"

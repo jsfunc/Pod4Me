@@ -42,6 +42,8 @@ internal class RadioBuffer(cacheDirectory: File, url: String,
     private val identity = UUID.randomUUID().toString()
     internal val window = RadioWindow(File(cacheDirectory, "radio-buffer-$identity"))
     val uri: Uri = Uri.parse("pod4me-radio://$identity/live.m3u8")
+    @Volatile var lastFailure: String? = null
+        private set
     private class InvalidStation(message: String) : IOException(message)
     enum class Status { CAPTURING, RECONNECTING, PAUSE_LIMIT, UNAVAILABLE }
     private val mutableStatus = MutableStateFlow(Status.CAPTURING)
@@ -68,8 +70,9 @@ internal class RadioBuffer(cacheDirectory: File, url: String,
                 if (e is CancellationException || closed.get() || captureStopped.get()) break
                 if (window.latestSequence != previousSequence) attempts = 0
                 previousSequence = window.latestSequence
+                lastFailure = e.message
                 window.fail(IOException("Could not receive this radio: ${e.message}", e))
-                if (++attempts > (if (window.hasAudio) retryLimit else minOf(retryLimit, 2)) || e is InvalidStation) {
+                if (++attempts > (if (window.hasAudio) retryLimit else minOf(retryLimit, 2)) || (e is InvalidStation && !window.hasAudio)) {
                     window.finish()
                     mutableStatus.value = Status.UNAVAILABLE
                     break
@@ -97,6 +100,7 @@ internal class RadioBuffer(cacheDirectory: File, url: String,
     }
 
     private fun appended() {
+        lastFailure = null
         reconnectDiscontinuity = false
         mutableStatus.value = Status.CAPTURING
     }

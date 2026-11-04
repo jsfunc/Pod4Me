@@ -190,6 +190,7 @@ public final class CoreChecks {
         equal(subscriptions, SubscriptionFormat.parse(SubscriptionFormat.opml(subscriptions).replace("UTF-8", "UTF-16").getBytes(StandardCharsets.UTF_16)), "OPML UTF-16 encoding");
         equal(List.of(new SubscriptionFormat.Entry("https://example.com/feed", "My podcast")), SubscriptionFormat.parse("https://example.com/feed [My podcast]".getBytes(StandardCharsets.UTF_8)), "text import keeps titles");
         equal(List.of(new SubscriptionFormat.Entry("https://example.com/a", "A")), SubscriptionFormat.parse("<opml><body><outline text='Group'><outline text='A' xmlUrl='https://example.com/a'/></outline></body></opml>".getBytes(StandardCharsets.UTF_8)), "nested OPML folders");
+        equal(List.of(new SubscriptionFormat.Entry("https://example.com/a", "A"), new SubscriptionFormat.Entry("https://example.com/b", "B")), SubscriptionFormat.parse("<opml><body><outline text='A' XMLURL='https://example.com/a'/><outline text='B' type='link' URL='https://example.com/b'/></body></opml>".getBytes(StandardCharsets.UTF_8)), "OPML attribute variants");
         rejects(() -> SubscriptionFormat.parse("<!DOCTYPE opml [<!ENTITY x SYSTEM 'file:///etc/passwd'>]><opml><body/></opml>".getBytes(StandardCharsets.UTF_8)), "OPML rejects DTDs");
         rejects(() -> SubscriptionFormat.parse("<rss><channel/></rss>".getBytes(StandardCharsets.UTF_8)), "RSS is not a subscription-list file");
         rejects(() -> SubscriptionFormat.parse(new byte[SubscriptionFormat.MAX_BYTES + 1]), "subscription import byte cap");

@@ -55,6 +55,46 @@ class RadioBufferTest {
         }
     }
 
+    @Test fun temporaryClientErrorsAndPortalPagesAfterAudioReconnect() {
+        for (failure in listOf("404", "403", "html")) {
+            val requests = java.util.concurrent.atomic.AtomicInteger()
+            val http = OkHttpClient.Builder().addInterceptor { chain ->
+                val failed = requests.incrementAndGet() == 2
+                val data = if (failed && failure == "html") "<html>Sign in to Wi-Fi</html>".toByteArray() else sample("mp3") + sample("mp3")
+                Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                    .code(if (failed && failure != "html") failure.toInt() else 200).message("Test").body(data.toResponseBody()).build()
+            }.build()
+            val buffer = RadioBuffer(cache, "https://radio.example/live", http, retryDelayMs = 10)
+            try {
+                awaitCondition { buffer.window.latestSequence >= 4 }
+                assertTrue(requests.get() >= 3)
+                assertNotEquals(RadioBuffer.Status.UNAVAILABLE, buffer.status.value)
+                assertTrue(buffer.window.read("0.mp3").isNotEmpty())
+                assertTrue(playlist(buffer.window.read("live.m3u8")).segments.any { it.relativeDiscontinuitySequence > 0 })
+            } finally { buffer.close() }
+        }
+    }
+
+    @Test fun missingHlsSegmentAfterAudioRefetchesPlaylistAndRecovers() {
+        val segmentRequests = java.util.concurrent.atomic.AtomicInteger()
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            val path = chain.request().url.encodedPath
+            val failed = path == "/12.mp3" && segmentRequests.incrementAndGet() == 1
+            val data = if (path.endsWith("m3u8"))
+                "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:2.1,\n10.mp3\n#EXTINF:2.1,\n11.mp3\n#EXTINF:2.1,\n12.mp3\n".toByteArray()
+                else sample("mp3")
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(if (failed) 404 else 200)
+                .message("Test").body(data.toResponseBody()).build()
+        }.build()
+        val buffer = RadioBuffer(cache, "https://radio.example/live.m3u8", http, retryDelayMs = 10)
+        try {
+            awaitCondition { buffer.window.latestSequence == 3L }
+            assertEquals(2, segmentRequests.get())
+            assertNotEquals(RadioBuffer.Status.UNAVAILABLE, buffer.status.value)
+            assertEquals(3, playlist(buffer.window.read("live.m3u8")).segments.size)
+        } finally { buffer.close() }
+    }
+
     @Test fun upstreamFailureKeepsSegmentsAndReconnectAddsDiscontinuity() {
         val requests = java.util.concurrent.atomic.AtomicInteger()
         val audio = sample("mp3") + sample("mp3")

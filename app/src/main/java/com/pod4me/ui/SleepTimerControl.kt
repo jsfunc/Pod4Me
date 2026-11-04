@@ -21,7 +21,7 @@ internal fun SleepTimerControl(playback: PlaybackUi, model: AppModel, onDialogVi
     LaunchedEffect(open) { onDialogVisibility(open) }
     val running = playback.sleepRemaining >= 0 || playback.sleepEnd
     fun close() { open = false; onDialogVisibility(false) }
-    val remaining = if (playback.sleepEnd) (playback.duration - playback.position).coerceAtLeast(0) else playback.sleepRemaining
+    val remaining = sleepTimerRemaining(playback)
     val label = if (playback.sleepEnd && playback.duration <= 0) "End" else playbackTime(remaining)
     val edit = {
         minutes = if (playback.sleepRemaining >= 0) ((playback.sleepRemaining + 59_999) / 60_000).toFloat().coerceIn(1f, 120f) else 15f
@@ -61,3 +61,7 @@ internal fun playbackTime(ms: Long): String {
     return if (seconds >= 3600) "%d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60)
         else "%d:%02d".format(seconds / 60, seconds % 60)
 }
+
+internal fun sleepTimerRemaining(playback: PlaybackUi): Long = if (playback.sleepEnd)
+    ((playback.duration - playback.position).coerceAtLeast(0) / playback.speed.coerceAtLeast(.1f)).toLong()
+    else playback.sleepRemaining

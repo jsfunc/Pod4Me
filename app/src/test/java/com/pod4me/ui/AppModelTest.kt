@@ -14,6 +14,17 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = PodApplication::class)
 class AppModelTest {
+    @Test fun statusAndInputHelpersKeepFailuresVisibleAndTimersAccurate() {
+        assertEquals(listOf("a", "c"), AppModel.remainingRefreshFailures(listOf("a", "b"), listOf("b", "c"), listOf("c"), listOf("a", "b", "c")))
+        assertEquals("https://feeds.example.com/show.xml", AppModel.subscriptionUrl("feeds.example.com/show.xml"))
+        assertEquals("https://podcasts.apple.com/fr/podcast/id123", AppModel.subscriptionUrl("podcasts.apple.com/fr/podcast/id123"))
+        assertNull(AppModel.subscriptionUrl("Culture / history"))
+        assertEquals(30_000L, sleepTimerRemaining(com.pod4me.playback.PlaybackUi(duration = 90_000, position = 30_000, speed = 2f, sleepEnd = true)))
+        for (status in listOf("RECONNECTING", "UNAVAILABLE", "PAUSE_LIMIT")) {
+            assertNotEquals("Expired position", radioStatus(com.pod4me.playback.PlaybackUi(radioStatus = status, radioNotice = "Expired position")))
+        }
+    }
+
     @Test fun importPreviewNormalizesChannelsAndCountsWithoutChangingLibrary() {
         val preview = AppModel.previewImport(listOf(
             com.pod4me.domain.SubscriptionFormat.Entry("https://example.com/existing", "New name"),
