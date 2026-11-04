@@ -1,6 +1,10 @@
 # Pod4Me verification
 
-Current source version: 1.0.19, code 27. Database version: 6. Android backup format: 2 (imports 1/2). Audit baseline: `audit.txt`. Earlier sections below preserve historical 1.0.0 evidence; later sections record the orange theme and duration-label releases.
+Current source version: 1.0.20, code 28. Database version: 6. Android backup format: 2 (imports 1/2). Audit baseline: `audit.txt`. Earlier sections below preserve historical 1.0.0 evidence; later sections record the orange theme and duration-label releases.
+
+## 2026-11-04 compact subscription toolbar — 1.0.20
+
+Replaced the wrapping text-action toolbar with seven equal-width icon controls in one Row. Retained callbacks, busy-state rules, existing tooltips and content descriptions. Added envelope, disk/save and restore-history vectors; reused +, vertical arrows and circled question mark. Removed visible subscription media labels, keeping their icon accessibility descriptions and the existing light video tint. No extra card rows or changed Library layout. Canonical `./tools/build-apk.sh` passed in **2m 17s**: **112 core checks, 11 schema/XML checks, 116 unit tests**, zero failures/errors/skips; release lint **0 errors / 34 warnings**. Release and device-test APKs compiled. Signed non-debuggable **1.0.20/code 28**, `dist/Pod4Me.apk` and `dist/Pod4Me-1.0.20.apk`: **29,412,641 bytes**, SHA-256 `23f6532278147b2e0d28c2588be5cbf2e44db2067655d6bb726df819e03a69a8`. Preserved `134a95237bf3ac990be2f7d1f33fdc7e9e6d16682401d3445cd9ad6fc10ff03f` certificate verified. Log `/tmp/pod4me-subscription-toolbar-build.log`. ADB lists no devices; phone layout/TalkBack check 55 remains pending. No public deployment.
 
 ## 2026-11-04 YouTube channel subscriptions and compact media distinction — 1.0.19
 

@@ -271,14 +271,16 @@ fun PodApp(model: AppModel) {
 private fun FeedScreen(library: Library, busy: Boolean, positions: ScrollPositions, onAdd: () -> Unit, onImport: () -> Unit, onExport: () -> Unit, onDiscover: () -> Unit,
     onOpenShared: () -> Unit, onBackup: () -> Unit, onRestore: () -> Unit, onBrowse: (Feed) -> Unit, onEdit: (Feed) -> Unit, onRefresh: (Feed) -> Unit, onSuggest: (Feed) -> Unit, onUnsubscribe: (Feed) -> Unit) {
     val context = LocalContext.current
-    FlowRow(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(onClick = onAdd, enabled = !busy) { Text("Add subscription") }
-        TextButton(onClick = onImport, enabled = !busy) { Text("Import") }
-        TextButton(onClick = onExport) { Text("Export") }
-        TextButton(onClick = onDiscover, enabled = !busy) { Text("Suggest") }
-        TextButton(onClick = onOpenShared, enabled = !busy) { Text("Open shared message") }
-        TextButton(onClick = onBackup, enabled = !busy) { Text("Back up library") }
-        TextButton(onClick = onRestore, enabled = !busy) { Text("Restore library") }
+    CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 40.dp) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            SubscriptionAction(R.drawable.ic_add, "Add subscription", !busy, onAdd)
+            SubscriptionAction(R.drawable.ic_down, "Import subscriptions", !busy, onImport)
+            SubscriptionAction(R.drawable.ic_up, "Export subscriptions", true, onExport)
+            SubscriptionAction(R.drawable.ic_help, "Suggest podcasts", !busy, onDiscover)
+            SubscriptionAction(R.drawable.ic_mail, "Open shared message", !busy, onOpenShared)
+            SubscriptionAction(R.drawable.ic_backup, "Back up library", !busy, onBackup)
+            SubscriptionAction(R.drawable.ic_restore, "Restore library", !busy, onRestore)
+        }
     }
     val visibleFeeds = library.feeds.filter { it.subscribed }
     if (visibleFeeds.isEmpty()) EmptyState("Add an RSS feed or YouTube channel, or import one URL per line followed by [title].")
@@ -327,8 +329,8 @@ private fun FeedScreen(library: Library, busy: Boolean, positions: ScrollPositio
                         val saved = library.downloadCounts[feed.id] ?: 0
                         Column(Modifier.weight(1f)) {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Icon(painterResource(if (video) R.drawable.ic_video else R.drawable.ic_podcast), contentDescription = null, modifier = Modifier.size(14.dp))
-                                Text("$label · $total episodes · $saved saved", style = MaterialTheme.typography.labelSmall,
+                                Icon(painterResource(if (video) R.drawable.ic_video else R.drawable.ic_podcast), contentDescription = label, modifier = Modifier.size(14.dp))
+                                Text("$total episodes · $saved saved", style = MaterialTheme.typography.labelSmall,
                                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                             Text("Expiry: ${feed.expiryDays?.let { "$it days" } ?: "never"}", style = MaterialTheme.typography.labelSmall)
@@ -343,6 +345,13 @@ private fun FeedScreen(library: Library, busy: Boolean, positions: ScrollPositio
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RowScope.SubscriptionAction(@androidx.annotation.DrawableRes icon: Int, label: String, enabled: Boolean, onClick: () -> Unit) {
+    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+        ActionIcon(icon, label, enabled = enabled, onClick = onClick)
     }
 }
 

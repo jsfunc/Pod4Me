@@ -19,8 +19,8 @@ android {
         applicationId = "com.pod4me"
         minSdk = 34
         targetSdk = 36
-        versionCode = 27
-        versionName = "1.0.19"
+        versionCode = 28
+        versionName = "1.0.20"
         buildConfigField("String", "SHARE_BASE_URL", "\"https://$sharingHost$sharingPath\"")
         manifestPlaceholders["sharingHost"] = sharingHost
         manifestPlaceholders["sharingPath"] = sharingPath
