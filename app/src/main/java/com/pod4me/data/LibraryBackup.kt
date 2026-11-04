@@ -15,7 +15,7 @@ import java.util.UUID
 /** Versioned, streaming metadata backup. Never accepts file paths or DownloadManager IDs. */
 internal object LibraryBackup {
     private val tables = linkedMapOf(
-        "feeds" to "id,url,name,expiry_days,artwork_url,subscribed",
+        "feeds" to "id,url,name,expiry_days,artwork_url,subscribed,auto_download",
         "lists" to "id,name,system",
         "episodes" to "id,feed_id,guid,title,audio_url,description,published,duration,stars,position,heard,is_video",
         "feed_defaults" to "feed_id,list_id",
@@ -23,13 +23,13 @@ internal object LibraryBackup {
         "bookmarks" to "episode_id,position,name",
         "queue" to "episode_id,ordinal",
     )
-    private val numeric = setOf("expiry_days", "subscribed", "system", "published", "duration", "stars", "position", "heard", "ordinal", "is_video")
+    private val numeric = setOf("expiry_days", "subscribed", "system", "published", "duration", "stars", "position", "heard", "ordinal", "is_video", "auto_download")
     private val nullable = setOf("expiry_days", "artwork_url")
     const val MAX_BYTES = 256L * 1024 * 1024
 
     fun export(db: SQLiteDatabase, context: Context, output: OutputStream) {
         JsonWriter(output.writer(Charsets.UTF_8)).use { json ->
-            json.beginObject().name("format").value("Pod4Me").name("version").value(2)
+            json.beginObject().name("format").value("Pod4Me").name("version").value(3)
             for ((table, columns) in tables) {
                 json.name(table).beginArray()
                 db.rawQuery("SELECT $columns FROM $table" + if (table == "queue") " ORDER BY ordinal" else "", null).use { cursor ->
@@ -67,7 +67,7 @@ internal object LibraryBackup {
             require(json.nextName() == "format" && json.nextString() == "Pod4Me") { "This is not a Pod4Me library backup" }
             require(json.nextName() == "version") { "Backup version is missing" }
             val version = json.nextInt()
-            require(version in 1..2) { "This backup version is not supported" }
+            require(version in 1..3) { "This backup version is not supported" }
             for ((table, columns) in tables) {
                 require(json.nextName() == table) { "Backup is incomplete or has an invalid table order" }
                 json.beginArray()
@@ -90,6 +90,7 @@ internal object LibraryBackup {
                     }
                     json.endObject()
                     if (version == 1 && table == "episodes" && !row.containsKey("is_video")) row.put("is_video", 0)
+                    if (version < 3 && table == "feeds" && !row.containsKey("auto_download")) row.put("auto_download", 0)
                     require(row.keySet() == expected) { "Backup record is missing fields" }
                     fun text(key: String) = row.getAsString(key)
                     fun number(key: String) = row.getAsLong(key)
@@ -106,11 +107,17 @@ internal object LibraryBackup {
                             val days = row.getAsLong("expiry_days")
                             require(days == null || days in 1L..36500L) { "Invalid feed expiry" }
                             Policy.validateExpiryDays(days?.toInt()); flag("subscribed")
+                            require(number("auto_download") in 0L..2L) { "Invalid automatic download setting" }
+                            require(number("auto_download") == 0L || (url.isNotBlank() && !com.pod4me.domain.YouTubeChannels.isYouTube(url))) { "Automatic downloads require a podcast feed" }
                             row.getAsString("artwork_url")?.let(FeedParser::httpUrl)
                             val id = find(db, "feeds", "url=?", url) ?: if (url.isEmpty()) "shared" else UUID.randomUUID().toString()
                             require(id !in feeds.values) { "Duplicate feed URL in backup" }
                             feeds[original] = id; row.put("id", id)
+                            // A restored preference starts from today; never turn restored history into a backlog download.
+                            if (number("auto_download") == 0L) row.putNull("auto_download_since")
+                            else row.put("auto_download_since", System.currentTimeMillis())
                             upsert(db, table, row, id)
+                            db.update("episodes", ContentValues().apply { put("auto_download_pending", 0) }, "feed_id=? AND auto_download_pending=1", arrayOf(id))
                         }
                         "lists" -> {
                             val original = text("id"); require(original !in lists) { "Duplicate list ID in backup" }

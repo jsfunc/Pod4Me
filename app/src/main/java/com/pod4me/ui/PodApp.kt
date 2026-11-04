@@ -283,8 +283,8 @@ fun PodApp(model: AppModel) {
         editingFeed?.let { feed -> if (feed.isYouTube) TextInputDialog("Rename YouTube channel", "Channel name", feed.name, "Save", busy,
             onDismiss = { editingFeed = null }, onSave = { name -> model.action {
                 model.store.editFeed(feed.id, name, feed.expiryDays, feed.defaults); editingFeed = null
-            } }) else FeedEditDialog(library.feeds.firstOrNull { it.id == feed.id } ?: feed, library.lists, positions, onDismiss = { editingFeed = null }) { name, days, defaults ->
-            model.action { model.store.editFeed(feed.id, name, days, defaults); editingFeed = null }
+            } }) else FeedEditDialog(library.feeds.firstOrNull { it.id == feed.id } ?: feed, library.lists, positions, onDismiss = { editingFeed = null }) { name, days, defaults, autoDownload ->
+            model.action { model.store.editFeed(feed.id, name, days, defaults, autoDownload); editingFeed = null }
         } }
         unsubscribingFeed?.let { feed -> AlertDialog(
             onDismissRequest = { unsubscribingFeed = null },
@@ -543,7 +543,7 @@ private fun EpisodeCard(ep: Episode, feed: String, current: Boolean, onDetails: 
                 Column(Modifier.weight(1f)) {
                     Text(date(ep.published) + (if (ep.isDownloaded) " · ${if (ep.heard) "Heard" else "Unheard"}" else "") +
                         (if (ep.stars > 0) " · ${"★".repeat(ep.stars)}" else ""), style = MaterialTheme.typography.bodySmall)
-                    if (ep.isDownloaded) Text("${(ep.progress * 100).toInt()}% · ${durationLabel(ep.duration)}" + if (ep.protected) " · 4ever" else "",
+                    if (ep.isDownloaded) Text("${(ep.progress * 100).toInt()}% · ${durationLabel(ep.duration)}${sizeLabel(ep.downloadedSize)}" + if (ep.protected) " · 4ever" else "",
                         style = MaterialTheme.typography.bodySmall)
                     else if (ep.downloadId != null) Text(downloadStatus ?: "Queued by Android", style = MaterialTheme.typography.bodySmall)
                 }
@@ -609,11 +609,11 @@ private fun CompactEpisodeCard(ep: Episode, feed: String, current: Boolean, artw
                         }
                     }
                     val minutes = durationMinutes(ep.duration)
-                    Text((if (ep.isVideo) "Video · " else "") + durationLabel(ep.duration) + sizeLabel(ep.byteSize),
+                    Text((if (ep.isVideo) "Video · " else "") + durationLabel(ep.duration) + sizeLabel(if (ep.isDownloaded) ep.downloadedSize else ep.byteSize),
                         style = MaterialTheme.typography.labelSmall, maxLines = 1,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.semantics {
-                            contentDescription = (minutes?.let { "Duration: $it minutes" } ?: "Duration unknown") + sizeLabel(ep.byteSize)
+                            contentDescription = (minutes?.let { "Duration: $it minutes" } ?: "Duration unknown") + sizeLabel(if (ep.isDownloaded) ep.downloadedSize else ep.byteSize)
                         })
                 }
             }
@@ -861,12 +861,13 @@ private fun DeleteAudioDialog(enabled: Boolean, onDismiss: () -> Unit, onDelete:
 }
 
 @Composable
-private fun FeedEditDialog(feed: Feed, lists: List<TrackList>, positions: ScrollPositions, onDismiss: () -> Unit, onSave: (String, Int?, Set<String>) -> Unit) {
+private fun FeedEditDialog(feed: Feed, lists: List<TrackList>, positions: ScrollPositions, onDismiss: () -> Unit, onSave: (String, Int?, Set<String>, Int) -> Unit) {
     val context = LocalContext.current
     var name by remember(feed.id) { mutableStateOf(feed.name) }
     var forever by remember(feed.id) { mutableStateOf(feed.expiryDays == null) }
     var days by remember(feed.id) { mutableStateOf((feed.expiryDays ?: 30).toString()) }
     var defaults by remember(feed.id) { mutableStateOf(feed.defaults) }
+    var autoDownload by remember(feed.id) { mutableIntStateOf(feed.autoDownload) }
     val validDays = days.toIntOrNull()?.let { it in 1..36500 } == true
     val valid = name.isNotBlank() && (forever || validDays)
     AlertDialog(onDismissRequest = onDismiss, title = {
@@ -910,6 +911,20 @@ private fun FeedEditDialog(feed: Feed, lists: List<TrackList>, positions: Scroll
             if (!forever) OutlinedTextField(value = days, onValueChange = { days = it }, label = { Text("Expiry in days (1–36500)") },
                 modifier = Modifier.fillMaxWidth(), singleLine = true, isError = !validDays)
             Text("Applies to future downloads. Heard episodes expire within three days; 4ever protects them.", style = MaterialTheme.typography.bodySmall)
+            Row(Modifier.fillMaxWidth().toggleable(value = autoDownload != 0, role = Role.Switch,
+                onValueChange = { autoDownload = if (it) 1 else 0 }), verticalAlignment = Alignment.CenterVertically) {
+                Text("Automatic download", Modifier.weight(1f))
+                Switch(checked = autoDownload != 0, onCheckedChange = null)
+            }
+            if (autoDownload != 0) {
+                Row(Modifier.fillMaxWidth().toggleable(value = autoDownload == 2, role = Role.Checkbox,
+                    onValueChange = { autoDownload = if (it) 2 else 1 }), verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = autoDownload == 2, onCheckedChange = null)
+                    Text("Allow mobile data")
+                }
+                Text("Downloads new episodes when you press Refresh. Wi-Fi only unless mobile data is allowed. Old or undated episodes stay manual. Files over 200MB still need approval on metered connections.",
+                    style = MaterialTheme.typography.bodySmall)
+            }
             Text("Default lists", fontWeight = FontWeight.Bold)
             Text("New episodes automatically appear in Unheard and this feed’s view.", style = MaterialTheme.typography.bodySmall)
             lists.filter { it.id !in setOf("heard", "unheard", "4ever") }.forEach { list ->
@@ -919,7 +934,7 @@ private fun FeedEditDialog(feed: Feed, lists: List<TrackList>, positions: Scroll
                 }
             }
         }
-    }, confirmButton = { TextButton(onClick = { onSave(name, if (forever) null else days.toInt(), defaults) }, enabled = valid) { Text("Save") } })
+    }, confirmButton = { TextButton(onClick = { onSave(name, if (forever) null else days.toInt(), defaults, autoDownload) }, enabled = valid) { Text("Save") } })
 }
 
 @Composable
@@ -1015,8 +1030,8 @@ private fun time(ms: Long): String {
 }
 private fun durationMinutes(ms: Long): Long? = ms.takeIf { it > 0 }?.let { (it / 60_000.0).roundToLong().coerceAtLeast(1) }
 private fun sizeLabel(bytes: Long?): String = bytes?.let {
-    if (it >= 1_000_000_000) " · %.1f GB".format(Locale.ROOT, it / 1e9)
-    else " · ${kotlin.math.ceil(it / 1e6).toLong()} MB"
+    if (it >= 1_000_000_000) " · %.1fGB".format(Locale.ROOT, it / 1e9)
+    else " · ${kotlin.math.ceil(it / 1e6).toLong()}MB"
 } ?: ""
 private fun durationLabel(ms: Long): String = durationMinutes(ms)?.let { "${it}min" } ?: "Length unknown"
 private val fullDate = DateTimeFormatter.ofPattern("d MMM yyyy")

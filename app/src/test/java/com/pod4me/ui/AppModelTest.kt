@@ -14,6 +14,21 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = PodApplication::class)
 class AppModelTest {
+    @Test fun simultaneousLargeDownloadPromptsAreQueuedAndDeduplicated() {
+        val model = AppModel(RuntimeEnvironment.getApplication())
+        val first = com.pod4me.domain.Episode("one", "feed", "One", "https://example.com/one.mp3", "", 0)
+        val second = first.copy(id = "two", title = "Two")
+        val enqueue = AppModel::class.java.getDeclaredMethod("queueDownloadConfirmation", com.pod4me.domain.Episode::class.java).apply { isAccessible = true }
+        enqueue.invoke(model, first); enqueue.invoke(model, second)
+        enqueue.invoke(model, first); enqueue.invoke(model, second)
+        assertEquals(first, model.downloadConfirmation.value)
+        model.dismissDownloadConfirmation()
+        assertEquals(second, model.downloadConfirmation.value)
+        model.dismissDownloadConfirmation()
+        assertNull(model.downloadConfirmation.value)
+        model.player.disconnect()
+    }
+
     @Test fun statusAndInputHelpersKeepFailuresVisibleAndTimersAccurate() {
         assertEquals(listOf("a", "c"), AppModel.remainingRefreshFailures(listOf("a", "b"), listOf("b", "c"), listOf("c"), listOf("a", "b", "c")))
         assertEquals("https://feeds.example.com/show.xml", AppModel.subscriptionUrl("feeds.example.com/show.xml"))

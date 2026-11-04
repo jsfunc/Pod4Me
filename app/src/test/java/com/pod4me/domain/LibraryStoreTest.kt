@@ -331,7 +331,7 @@ class LibraryStoreTest {
         store.activeEpisode.set(null)
         val output = java.io.ByteArrayOutputStream(); store.exportLibrary(output)
         val json = org.json.JSONObject(output.toString("UTF-8"))
-        assertEquals(2, json.getInt("version"))
+        assertEquals(3, json.getInt("version"))
         store.restoreLibrary(output.toByteArray().inputStream())
         assertTrue(store.library.value.episode(video.id)!!.isVideo)
         assertEquals(1234, store.library.value.episode(video.id)!!.position)
@@ -339,6 +339,8 @@ class LibraryStoreTest {
         try { store.activate(episode.id, stream = true); fail("Audio must not become a video stream") } catch (_: IllegalArgumentException) { }
         // Legacy version-1 backups contain no media-type column and still restore.
         json.put("version", 1)
+        val legacyFeeds = json.getJSONArray("feeds")
+        for (i in 0 until legacyFeeds.length()) legacyFeeds.getJSONObject(i).remove("auto_download")
         val rows = json.getJSONArray("episodes")
         for (i in 0 until rows.length()) rows.getJSONObject(i).remove("is_video")
         store.restoreLibrary(json.toString().byteInputStream())
@@ -574,6 +576,8 @@ class LibraryStoreTest {
         assertEquals(500_000, store.description(other.id).length)
     }
     @Test fun noOpReconciliationKeepsSameSnapshot() = runBlocking {
+        store.reconcileDownloads() // The first maintenance pass backfills the actual size of older files.
+        assertEquals(file.length(), store.library.value.episode(episode.id)!!.downloadedSize)
         val before = store.library.value
         store.reconcileDownloads()
         assertSame(before, store.library.value)

@@ -67,6 +67,29 @@ class SchemaTests(unittest.TestCase):
         for path in (ROOT / "app/src/main").rglob("*.xml"):
             ET.parse(path)
 
+    def test_auto_download_migration_defaults_off_and_preserves_existing_files(self):
+        with sqlite3.connect(":memory:") as old:
+            schema = (ROOT / "app/src/main/assets/schema.sql").read_text()
+            for column in (", auto_download INTEGER NOT NULL DEFAULT 0 CHECK(auto_download IN (0,1,2))",
+                           ", auto_download_since INTEGER",
+                           ", auto_download_pending INTEGER NOT NULL DEFAULT 0 CHECK(auto_download_pending IN (0,1))",
+                           ", downloaded_size INTEGER CHECK(downloaded_size IS NULL OR downloaded_size>0)"):
+                schema = schema.replace(column, "")
+            old.executescript(schema)
+            old.execute("INSERT INTO feeds(id,url,name,expiry_days,etag) VALUES('f','https://example.com/rss','My name',5,'tag')")
+            old.execute("INSERT INTO episodes(id,feed_id,guid,title,audio_url,description,published,path,expiry,stars,position) VALUES('e','f','g','Saved','https://example.com/audio','Notes',1,'/audio',12345,5,42000)")
+            old.execute("INSERT INTO memberships VALUES('e','4ever')")
+            old.execute("INSERT INTO queue VALUES('e',0)")
+            old.executescript((ROOT / "app/src/main/assets/migration_9_10.sql").read_text())
+            self.assertEqual(('My name', 5, 'tag', 0, None), old.execute("SELECT name,expiry_days,etag,auto_download,auto_download_since FROM feeds").fetchone())
+            self.assertEqual(('/audio', 12345, 5, 42000, 0, None), old.execute("SELECT path,expiry,stars,position,auto_download_pending,downloaded_size FROM episodes").fetchone())
+            self.assertEqual([('e', '4ever')], old.execute("SELECT * FROM memberships").fetchall())
+            self.assertEqual([('e', 0)], old.execute("SELECT * FROM queue").fetchall())
+            with self.assertRaises(sqlite3.IntegrityError):
+                old.execute("UPDATE feeds SET auto_download=3")
+            with self.assertRaises(sqlite3.IntegrityError):
+                old.execute("UPDATE episodes SET downloaded_size=-1")
+
     def test_move_notice_migration_preserves_library_and_invalidates_validators(self):
         with sqlite3.connect(":memory:") as old:
             old.executescript((ROOT / "app/src/main/assets/schema.sql").read_text().replace(", unsubscribed_move_url TEXT", ""))

@@ -2,7 +2,7 @@ package com.pod4me.domain
 
 data class Feed(val id: String, val url: String, val name: String, val expiryDays: Int?, val defaults: Set<String> = emptySet(), val error: String? = null, val artworkUrl: String? = null, val subscribed: Boolean = true,
     val etag: String? = null, val lastModified: String? = null, val lastRefreshed: Long? = null,
-    val unsubscribedMoveUrl: String? = null) {
+    val unsubscribedMoveUrl: String? = null, val autoDownload: Int = 0) {
     val isYouTube get() = YouTubeChannels.isYouTube(url)
 }
 data class Episode(
@@ -14,6 +14,7 @@ data class Episode(
     val newInLastRefresh: Boolean = false,
     val isVideo: Boolean = false,
     val byteSize: Long? = null,
+    val downloadedSize: Long? = null,
 ) {
     val isDownloaded get() = path != null
     val progress get() = if (duration > 0) (position.toDouble() / duration).coerceIn(0.0, 1.0) else 0.0

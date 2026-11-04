@@ -32,16 +32,22 @@ class AppModel(application: Application) : AndroidViewModel(application) {
     val store = app.store
     val library = store.library
     private val mutableDownloadConfirmation = MutableStateFlow<Episode?>(null)
+    private val waitingDownloadConfirmations = ArrayDeque<Episode>()
     val downloadConfirmation = mutableDownloadConfirmation.asStateFlow()
     fun requestDownload(id: String) = action { downloadOrConfirm(id) }
     private suspend fun downloadOrConfirm(id: String) {
         try { store.download(id) }
-        catch (e: com.pod4me.data.DownloadConfirmationRequired) { mutableDownloadConfirmation.value = e.episode }
+        catch (e: com.pod4me.data.DownloadConfirmationRequired) { queueDownloadConfirmation(e.episode) }
     }
-    fun dismissDownloadConfirmation() { mutableDownloadConfirmation.value = null }
+    private fun queueDownloadConfirmation(ep: Episode) {
+        if (mutableDownloadConfirmation.value?.id == ep.id || waitingDownloadConfirmations.any { it.id == ep.id }) return
+        if (mutableDownloadConfirmation.value == null) mutableDownloadConfirmation.value = ep
+        else waitingDownloadConfirmations.addLast(ep)
+    }
+    fun dismissDownloadConfirmation() { mutableDownloadConfirmation.value = waitingDownloadConfirmations.removeFirstOrNull() }
     fun confirmDownload() {
         val ep = mutableDownloadConfirmation.value ?: return
-        mutableDownloadConfirmation.value = null
+        dismissDownloadConfirmation()
         action { store.download(ep.id, allowLargeMetered = true) }
     }
     val radios = app.radios.state
@@ -109,7 +115,10 @@ class AppModel(application: Application) : AndroidViewModel(application) {
     private fun refreshFeeds(targets: List<Feed>) = network {
         val previousFailures = mutableRefresh.value.failedIds
         val refresher = com.pod4me.data.FeedRefresher(app.feeds::refresh,
-            { feed, response -> store.applyRefresh(feed, response) }, { feed, message -> store.feedError(feed.id, message) })
+            { feed, response ->
+                store.applyRefresh(feed, response)
+                store.startAutoDownloads(feed.id).forEach(::queueDownloadConfirmation)
+            }, { feed, message -> store.feedError(feed.id, message) })
         try {
             val failed = refresher.refresh(targets) { done, total -> mutableRefresh.value = RefreshUi(done, total, true) }
             mutableRefresh.value = mutableRefresh.value.copy(running = false, failedIds = remainingRefreshFailures(previousFailures, targets.map { it.id }, failed.map { it.id }, library.value.subscriptions.map { it.id }))

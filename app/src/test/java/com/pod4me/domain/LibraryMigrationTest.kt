@@ -24,6 +24,7 @@ class LibraryMigrationTest {
 
     @Test fun upgradesVersionSevenPreservingLibrary() { checkUpgrade(7) }
     @Test fun upgradesVersionEightPreservingLibraryAndRefetchingMoveMetadata() { checkUpgrade(8) }
+    @Test fun upgradesVersionNineWithAutomaticDownloadsDisabled() { checkUpgrade(9) }
 
     @Test fun versionEightCapsOnlyDownloadedHeardDeadlinesWithoutExtendingEarlierOnes() {
         val context = RuntimeEnvironment.getApplication()
@@ -63,13 +64,16 @@ class LibraryMigrationTest {
         file.parentFile!!.mkdirs()
         SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
             val artwork = (if (oldVersion >= 2) ", artwork_url TEXT" else "") + (if (oldVersion >= 3) ", subscribed INTEGER NOT NULL DEFAULT 1" else "") +
-                (if (oldVersion >= 8) ", etag TEXT, last_modified TEXT, last_refreshed INTEGER" else "")
+                (if (oldVersion >= 8) ", etag TEXT, last_modified TEXT, last_refreshed INTEGER" else "") +
+                (if (oldVersion >= 9) ", unsubscribed_move_url TEXT" else "")
             db.execSQL("CREATE TABLE feeds(id TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, name TEXT NOT NULL, expiry_days INTEGER, error TEXT$artwork)")
             val rest = context.assets.open("schema.sql").bufferedReader().use { it.readText() }.substringAfter(';')
                 .let { if (oldVersion < 5) it.replace(", new_in_last_refresh INTEGER NOT NULL DEFAULT 0 CHECK(new_in_last_refresh IN (0,1))", "") else it }
                 .let { if (oldVersion < 6) it.replace(", is_video INTEGER NOT NULL DEFAULT 0 CHECK(is_video IN (0,1))", "") else it }
                 .let { if (oldVersion < 7) it.replace(", byte_size INTEGER CHECK(byte_size IS NULL OR byte_size>0)", "") else it }
                 .let { if (oldVersion < 4) it.replace(", manager_id INTEGER", "") else it }
+                .replace(", auto_download_pending INTEGER NOT NULL DEFAULT 0 CHECK(auto_download_pending IN (0,1))", "")
+                .replace(", downloaded_size INTEGER CHECK(downloaded_size IS NULL OR downloaded_size>0)", "")
             rest.split(';').map(String::trim).filter(String::isNotEmpty).forEach(db::execSQL)
             db.execSQL("INSERT INTO feeds(id,url,name,expiry_days) VALUES('f','https://example.com/feed','My name',30)")
             if (oldVersion >= 8) db.execSQL("UPDATE feeds SET etag='v1',last_modified='date',last_refreshed=123")
@@ -82,10 +86,18 @@ class LibraryMigrationTest {
         val helper = LibraryDatabase(context)
         try {
             val db = helper.writableDatabase
-            assertEquals(9, db.version)
+            assertEquals(10, db.version)
             db.rawQuery("SELECT etag,last_modified,last_refreshed,unsubscribed_move_url FROM feeds", null).use {
-                assertTrue(it.moveToFirst()); assertTrue(it.isNull(0)); assertTrue(it.isNull(1)); assertTrue(it.isNull(3))
+                assertTrue(it.moveToFirst()); assertTrue(it.isNull(3))
+                if (oldVersion < 9) { assertTrue(it.isNull(0)); assertTrue(it.isNull(1)) }
+                else { assertEquals("v1", it.getString(0)); assertEquals("date", it.getString(1)) }
                 if (oldVersion >= 8) assertEquals(123L, it.getLong(2))
+            }
+            db.rawQuery("SELECT auto_download,auto_download_since FROM feeds", null).use {
+                assertTrue(it.moveToFirst()); assertEquals(0, it.getInt(0)); assertTrue(it.isNull(1))
+            }
+            db.rawQuery("SELECT auto_download_pending,downloaded_size FROM episodes", null).use {
+                assertTrue(it.moveToFirst()); assertEquals(0, it.getInt(0)); assertTrue(it.isNull(1))
             }
             db.rawQuery("SELECT name,subscribed,artwork_url FROM feeds", null).use {
                 assertTrue(it.moveToFirst()); assertEquals("My name", it.getString(0)); assertEquals(1, it.getInt(1))
