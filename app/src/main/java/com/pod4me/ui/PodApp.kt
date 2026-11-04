@@ -63,6 +63,7 @@ fun PodApp(model: AppModel) {
     val positions = rememberSaveable(saver = ScrollPositions.Saver) { ScrollPositions() }
     val screenState = rememberSaveableStateHolder()
     val library by model.library.collectAsStateWithLifecycle()
+    val downloadStatuses by model.store.downloadStatuses.collectAsStateWithLifecycle()
     val currentId by remember(model) { model.player.state.map { it.id }.distinctUntilChanged() }.collectAsStateWithLifecycle(initialValue = null)
     val storage by model.storage.collectAsStateWithLifecycle()
     val busy by model.busy.collectAsStateWithLifecycle()
@@ -243,7 +244,7 @@ fun PodApp(model: AppModel) {
                                     onCancel = { model.action { model.store.cancelDownload(ep.id) } },
                                     onDelete = { model.action { model.store.deleteAudio(ep.id) } },
                                     onQueue = { model.action { model.store.enqueue(ep.id) } }, compact = !downloaded,
-                                    artworkUrl = library.feedArtwork(ep.feedId)) }
+                                    artworkUrl = library.feedArtwork(ep.feedId), downloadStatus = downloadStatuses[ep.id]) }
                             }
                         }
                     }
@@ -523,9 +524,9 @@ private fun SortSelector(sort: TrackSort, onChange: (TrackSort) -> Unit) {
 @Composable
 private fun EpisodeCard(ep: Episode, feed: String, current: Boolean, onDetails: () -> Unit, onPlay: () -> Unit,
     onDownload: () -> Unit, onCancel: () -> Unit, onDelete: () -> Unit, onQueue: () -> Unit, compact: Boolean = false,
-    artworkUrl: String? = null) {
+    artworkUrl: String? = null, downloadStatus: String? = null) {
     if (compact) {
-        CompactEpisodeCard(ep, feed, current, artworkUrl, onDetails, onPlay, onDownload, onCancel, onQueue)
+        CompactEpisodeCard(ep, feed, current, artworkUrl, onDetails, onPlay, onDownload, onCancel, onQueue, downloadStatus)
         return
     }
     var confirmDelete by remember(ep.id) { mutableStateOf(false) }
@@ -544,7 +545,7 @@ private fun EpisodeCard(ep: Episode, feed: String, current: Boolean, onDetails: 
                         (if (ep.stars > 0) " · ${"★".repeat(ep.stars)}" else ""), style = MaterialTheme.typography.bodySmall)
                     if (ep.isDownloaded) Text("${(ep.progress * 100).toInt()}% · ${durationLabel(ep.duration)}" + if (ep.protected) " · 4ever" else "",
                         style = MaterialTheme.typography.bodySmall)
-                    else if (ep.downloadId != null) Text("Downloading…", style = MaterialTheme.typography.bodySmall)
+                    else if (ep.downloadId != null) Text(downloadStatus ?: "Queued by Android", style = MaterialTheme.typography.bodySmall)
                 }
                 CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 40.dp) {
                     if (ep.isDownloaded) {
@@ -572,7 +573,7 @@ private fun EpisodeCard(ep: Episode, feed: String, current: Boolean, onDetails: 
 
 @Composable
 private fun CompactEpisodeCard(ep: Episode, feed: String, current: Boolean, artworkUrl: String?,
-    onDetails: () -> Unit, onPlay: () -> Unit, onDownload: () -> Unit, onCancel: () -> Unit, onQueue: () -> Unit) {
+    onDetails: () -> Unit, onPlay: () -> Unit, onDownload: () -> Unit, onCancel: () -> Unit, onQueue: () -> Unit, downloadStatus: String?) {
     val colors = MaterialTheme.colorScheme
     val background = if (ep.newInLastRefresh) {
         if (isSystemInDarkTheme()) colors.surfaceContainerHigh else colors.surfaceContainerLowest
@@ -621,7 +622,7 @@ private fun CompactEpisodeCard(ep: Episode, feed: String, current: Boolean, artw
                 style = MaterialTheme.typography.bodySmall)
             if (ep.isDownloaded) Text("${(ep.progress * 100).toInt()}% played · ${if (ep.protected) "4ever" else ep.expiry?.let { "Expires ${date(it)}" } ?: "No expiry"}",
                 style = MaterialTheme.typography.bodySmall)
-            else if (ep.downloadId != null) Text("Downloading…", style = MaterialTheme.typography.bodySmall)
+            else if (ep.downloadId != null) Text(downloadStatus ?: "Queued by Android", style = MaterialTheme.typography.bodySmall)
             ep.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         }
     }
@@ -629,6 +630,7 @@ private fun CompactEpisodeCard(ep: Episode, feed: String, current: Boolean, artw
 
 @Composable
 private fun QueueScreen(library: Library, model: AppModel, positions: ScrollPositions, onDetails: (String) -> Unit) {
+    val downloads by model.store.downloadStatuses.collectAsStateWithLifecycle()
     Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Text("Up next", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
         TextButton(enabled = library.queue.isNotEmpty(), onClick = { model.action { model.player.playQueue() } }) { Text("Play queue") }
@@ -650,11 +652,14 @@ private fun QueueScreen(library: Library, model: AppModel, positions: ScrollPosi
                         ActionIcon(R.drawable.ic_delete, "Remove from queue", onClick = { model.action { model.store.removeFromQueue(id) } })
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(library.feedName(ep.feedId), modifier = Modifier.weight(1f).clickable { onDetails(id) },
+                        Text(if (ep.downloadId != null) downloads[id] ?: "Queued by Android" else library.feedName(ep.feedId),
+                            modifier = Modifier.weight(1f).clickable { onDetails(id) },
                             style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         if (ep.isDownloaded) ActionIcon(R.drawable.ic_play, "Play queued episode",
                             onClick = { model.action { model.player.play(ep.id, library.queue) } })
-                        else ActionIcon(R.drawable.ic_download, "Download queued episode", enabled = ep.downloadId == null,
+                        else if (ep.downloadId != null) ActionIcon(R.drawable.ic_close, "Cancel download",
+                            onClick = { model.action { model.store.cancelDownload(id) } })
+                        else ActionIcon(R.drawable.ic_download, "Download queued episode",
                             onClick = { model.requestDownload(id) })
                     }
                 }
@@ -666,6 +671,7 @@ private fun QueueScreen(library: Library, model: AppModel, positions: ScrollPosi
 @Composable
 private fun PlayerScreen(library: Library, model: AppModel, positions: ScrollPositions, onDetails: (String) -> Unit, onFullscreen: () -> Unit) {
     val playback by model.player.state.collectAsStateWithLifecycle()
+    val downloads by model.store.downloadStatuses.collectAsStateWithLifecycle()
     if (playback.radioName != null) { LivePlayer(playback, model); return }
     val ep = library.episode(playback.id)
     var addBookmark by remember { mutableStateOf<Long?>(null) }
@@ -683,7 +689,8 @@ private fun PlayerScreen(library: Library, model: AppModel, positions: ScrollPos
         if (ep.isVideo) {
             VideoSurface(model.player.videoPlayer, playback.videoAspectRatio, playback.playing)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(if (ep.isDownloaded) "Video · Downloaded" else "Video · Streaming", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
+                Text(if (ep.isDownloaded) "Video · Downloaded" else if (ep.downloadId != null) downloads[ep.id] ?: "Queued by Android"
+                    else "Video · Streaming", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
                 ActionIcon(R.drawable.ic_fullscreen, "Fullscreen video", onClick = onFullscreen)
                 if (!ep.isDownloaded) TextButton(onClick = {
                     if (ep.downloadId != null) model.action { model.store.cancelDownload(ep.id) } else model.requestDownload(ep.id)

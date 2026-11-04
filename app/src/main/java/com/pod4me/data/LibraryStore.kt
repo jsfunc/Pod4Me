@@ -51,6 +51,8 @@ class LibraryStore(private val context: Context) : AutoCloseable {
     private val mutex = Mutex()
     private val mutableLibrary = MutableStateFlow(Library())
     val library = mutableLibrary.asStateFlow()
+    private val mutableDownloadStatuses = MutableStateFlow<Map<String, String>>(emptyMap())
+    val downloadStatuses = mutableDownloadStatuses.asStateFlow()
     val activeEpisode = AtomicReference<String?>(null)
     private val progressEpochs = java.util.concurrent.ConcurrentHashMap<String, Long>()
     fun progressEpoch(id: String): Long = progressEpochs[id] ?: 0L
@@ -334,8 +336,10 @@ class LibraryStore(private val context: Context) : AutoCloseable {
         val ep = episode(db, id) ?: return@write
         ep.downloadId?.let { manager.remove(it) }
         db.update("episodes", values("download_id" to null, "error" to null), "id=?", arrayOf(id))
+        mutableDownloadStatuses.value -= id
     }
-    suspend fun reconcileDownloads() = write { db ->
+    suspend fun reconcileDownloads(checkFiles: Boolean = true) = write { db ->
+        val statuses = mutableMapOf<String, String>()
         val pending = db.rows("SELECT $projection FROM episodes WHERE download_id IS NOT NULL") { readEpisode(it) }
         for (ep in pending) {
             val downloadId = ep.downloadId ?: continue
@@ -370,13 +374,20 @@ class LibraryStore(private val context: Context) : AutoCloseable {
                         manager.remove(downloadId)
                         db.update("episodes", values("download_id" to null, "error" to "${downloadFailure(reason)}. Tap Download to retry."), "id=?", arrayOf(ep.id))
                     }
+                    else -> statuses[ep.id] = downloadStatus(
+                        cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)),
+                        cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON)),
+                        cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)),
+                        cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES)))
                 }
             }
         }
         // Repair metadata if Android or the user has removed a downloaded file.
-        db.rows("SELECT $projection FROM episodes WHERE path IS NOT NULL") { readEpisode(it) }.forEach { ep ->
+        if (checkFiles) db.rows("SELECT $projection FROM episodes WHERE path IS NOT NULL") { readEpisode(it) }.forEach { ep ->
             if (!File(requireNotNull(ep.path)).isFile) { ep.managerId?.let { manager.remove(it) }; clearDownload(db, ep.id) }
         }
+        // Progress is transient: no SQLite writes or full library publication for every byte update.
+        mutableDownloadStatuses.value = statuses
     }
     // Reject a clear publisher error page, not unfamiliar but potentially valid audio.
     private fun isHtmlDownload(file: File): Boolean {

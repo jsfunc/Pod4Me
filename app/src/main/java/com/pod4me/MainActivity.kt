@@ -38,9 +38,9 @@ class MainActivity : ComponentActivity() {
                 try {
                     model.onLaunch()
                     while (isActive) {
-                        delay(10_000)
+                        delay(2_000)
                         if (model.library.value.episodes.any { it.downloadId != null }) {
-                            try { model.store.reconcileDownloads() } catch (e: Exception) { model.app.report(e) }
+                            try { model.store.reconcileDownloads(checkFiles = false) } catch (e: Exception) { model.app.report(e) }
                         }
                     }
                 } finally { ticker.cancel(); model.player.disconnect() }

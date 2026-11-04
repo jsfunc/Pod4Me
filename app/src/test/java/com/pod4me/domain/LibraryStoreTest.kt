@@ -21,6 +21,34 @@ import java.io.File
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = Application::class)
 class LibraryStoreTest {
+    @Test fun downloadProgressChangesWithoutRebuildingLibraryAndClearsOnCancelOrCompletion() = runBlocking {
+        store.deleteAudio(episode.id)
+        store.download(episode.id)
+        val manager = RuntimeEnvironment.getApplication().getSystemService(DownloadManager::class.java)
+        val request = shadowOf(shadowOf(manager).getRequest(store.library.value.episode(episode.id)!!.downloadId!!))
+        request.setStatus(DownloadManager.STATUS_RUNNING)
+        request.setTotalSize(4_000_000); request.setBytesSoFar(1_000_000)
+        val library = store.library.value
+        store.reconcileDownloads(checkFiles = false)
+        assertEquals("Downloading · 25% · 1.0 MB", store.downloadStatuses.value[episode.id])
+        request.setBytesSoFar(2_000_000)
+        store.reconcileDownloads(checkFiles = false)
+        assertEquals("Downloading · 50% · 2.0 MB", store.downloadStatuses.value[episode.id])
+        assertSame(library, store.library.value)
+        store.cancelDownload(episode.id)
+        assertTrue(store.downloadStatuses.value.isEmpty())
+        store.download(episode.id)
+        val next = shadowOf(shadowOf(manager).getRequest(store.library.value.episode(episode.id)!!.downloadId!!))
+        next.setStatus(DownloadManager.STATUS_RUNNING)
+        store.reconcileDownloads(checkFiles = false)
+        assertTrue(store.downloadStatuses.value.containsKey(episode.id))
+        file.writeBytes(byteArrayOf(1, 2, 3))
+        next.setStatus(DownloadManager.STATUS_SUCCESSFUL)
+        store.reconcileDownloads(checkFiles = false)
+        assertTrue(store.downloadStatuses.value.isEmpty())
+        assertTrue(store.library.value.episode(episode.id)!!.isDownloaded)
+    }
+
     @Test fun untrustedMoveCannotChangeAddressEvenWhenDestinationIsHttps() = runBlocking {
         val original = store.library.value.subscriptions.single()
         for (directive in listOf(false, true)) {
